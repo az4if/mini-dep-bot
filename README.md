@@ -127,6 +127,10 @@ standard 5-field cron syntax in UTC, e.g. `0 6 * * 1` = every Monday at
 - Only exact (`==`) pins are handled in `requirements.txt`.
 - Go module proxy lookups need outbound access to `proxy.golang.org`.
 
+## Support
+
+Questions, bug reports, or integration issues: [az4if@proton.me](mailto:az4if@proton.me)
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
