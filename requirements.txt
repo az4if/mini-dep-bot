@@ -1,4 +1,4 @@
-requests==2.34.2
+requests==2.20.2
 packaging==26.2
 python-dotenv==1.2.2
 rich==15.0.0
