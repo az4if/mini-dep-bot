@@ -131,6 +131,6 @@ standard 5-field cron syntax in UTC, e.g. `0 6 * * 1` = every Monday at
 
 Questions, bug reports, or integration issues: [az4if@proton.me](mailto:az4if@proton.me)
 
-## License
+## Licenseg
 
 This project is licensed under the [MIT License](LICENSE).
