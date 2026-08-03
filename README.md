@@ -10,8 +10,11 @@ pull request for each one it finds.
 - Checks three ecosystems: npm (`package.json`), Python (`requirements.txt`),
   and Go (`go.mod`)
 - Looks up real latest-version data from each package registry
-- Opens one pull request per outdated dependency, with a clear title and
-  description of the version bump
+- Opens one pull request per manifest, bundling every outdated dependency
+  found in it — re-running the bot updates that same PR with a new commit
+  instead of opening a duplicate
+- Optional `.mini-dep-bot.yml` config to ignore specific packages or pin
+  one to a max major version
 - Runs on demand or on a schedule via GitHub Actions
 - No wrapper libraries — talks to the GitHub REST API directly with `requests`
 
@@ -30,10 +33,12 @@ pull request for each one it finds.
 ```
 mini-dep-bot/
 ├── bot.py               # entrypoint / orchestration
+├── config.py              # loads optional .mini-dep-bot.yml (ignore/pin)
 ├── github_api.py         # GitHub REST API calls (branches, files, PRs)
 ├── parsers.py             # manifest parsing + version comparison
 ├── registries.py          # npm / PyPI / Go proxy "latest version" lookups
 ├── requirements.txt       # this project's own dependency (requests)
+├── .mini-dep-bot.yml.example   # template for the optional config file
 └── .github/workflows/
     └── dependency-check.yml   # runs the bot weekly via GitHub Actions
 ```
@@ -118,12 +123,31 @@ Edit the `cron` line in `.github/workflows/dependency-check.yml`. It uses
 standard 5-field cron syntax in UTC, e.g. `0 6 * * 1` = every Monday at
 06:00 UTC, `0 0 * * *` = daily at midnight UTC.
 
+## Configuration
+
+Drop a `.mini-dep-bot.yml` at the root of the target repo to customize
+what the bot touches (see `.mini-dep-bot.yml.example` for a template).
+Both keys are optional:
+
+```yaml
+ignore:
+  - some-noisy-package     # never opens a PR for this one
+
+pin:
+  some-package: 2          # stays on major version 2 — picks up
+                            # minor/patch releases, not major bumps
+```
+
+No config file at all means the previous behavior: nothing ignored,
+nothing pinned.
+
 ## Limitations
 
 - Version comparison uses a simple numeric-segment comparator, not full
   semver / PEP 440 / Go module semantics — fine for plain `X.Y.Z`
   versions, less reliable for pre-releases or unusual version schemes.
-- One PR per outdated dependency (no grouping).
+- Grouping is per-manifest, not per-repo — a repo with outdated npm *and*
+  pip packages gets two PRs, one per manifest, not one combined PR.
 - Only exact (`==`) pins are handled in `requirements.txt`.
 - Go module proxy lookups need outbound access to `proxy.golang.org`.
 
