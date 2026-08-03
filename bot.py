@@ -16,6 +16,9 @@ Usage:
 import os
 import sys
 
+from dotenv import load_dotenv
+from rich.console import Console
+
 from github_api import GitHubClient
 from parsers import (
     parse_package_json, bump_package_json,
@@ -24,6 +27,13 @@ from parsers import (
     is_outdated,
 )
 from registries import latest_npm_version, latest_pypi_version, latest_go_version
+
+# Loads GITHUB_TOKEN / TARGET_REPO from a local .env file if present;
+# a no-op (and harmless) when running in GitHub Actions, where the
+# environment is already set via `env:` in the workflow.
+load_dotenv()
+
+console = Console()
 
 # Each entry: (path in repo, parser, registry lookup, bump function)
 MANIFESTS = [
@@ -77,22 +87,31 @@ def main():
     token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("TARGET_REPO")
     if not token or not repo:
-        print("Set GITHUB_TOKEN and TARGET_REPO environment variables.", file=sys.stderr)
+        console.print(
+            "[bold red]Set GITHUB_TOKEN and TARGET_REPO[/bold red] "
+            "(environment variables, or a .env file).",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     client = GitHubClient(token)
     base_branch = client.get_default_branch(repo)
+    console.print(f"[bold]mini-dep-bot[/bold] checking [cyan]{repo}[/cyan]@{base_branch}")
 
     all_prs = []
     for path, parse_fn, lookup_fn, bump_fn in MANIFESTS:
+        console.print(f"  [dim]scanning[/dim] {path}...")
         all_prs += check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn)
 
     if all_prs:
-        print(f"Opened {len(all_prs)} pull request(s):")
+        console.print(f"[bold green]Opened {len(all_prs)} pull request(s):[/bold green]")
         for url in all_prs:
-            print(f"  - {url}")
+            console.print(f"  - {url}")
     else:
-        print("Everything is already up to date (or no supported manifest files were found).")
+        console.print(
+            "[green]Everything is already up to date[/green] "
+            "(or no supported manifest files were found)."
+        )
 
 
 if __name__ == "__main__":

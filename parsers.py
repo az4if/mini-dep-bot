@@ -11,6 +11,8 @@ plus shared version-comparison helpers.
 import json
 import re
 
+from packaging.version import InvalidVersion, Version
+
 
 # ---------------------------------------------------------------- package.json
 
@@ -112,9 +114,21 @@ def _strip_prefix(version: str) -> str:
     return re.sub(r"^[^\d]*", "", version)
 
 
+def _parse_version(version: str) -> Version | None:
+    """Parse a version string via `packaging`, tolerating a leading
+    'v'/'^'/'~'/'>=' the way this project's manifests use them.
+    Returns None if it still isn't a valid PEP 440 / semver-ish version.
+    """
+    try:
+        return Version(_strip_prefix(version))
+    except InvalidVersion:
+        return None
+
+
 def _version_tuple(version: str) -> tuple:
-    """'1.2.3' -> (1, 2, 3). Non-numeric trailing parts (pre-releases,
-    build metadata) are ignored for comparison purposes.
+    """Fallback comparator for version strings `packaging` can't parse
+    (e.g. Go's 'v1.2.3-0.2024...' pseudo-versions). '1.2.3' -> (1, 2, 3);
+    non-numeric trailing parts are ignored.
     """
     clean = _strip_prefix(version)
     parts = re.split(r"[.\-+]", clean)
@@ -129,7 +143,20 @@ def _version_tuple(version: str) -> tuple:
 
 
 def is_outdated(current: str, latest: str) -> bool:
-    """True if `latest` is a strictly newer version than `current`."""
+    """True if `latest` is a strictly newer version than `current`.
+
+    Uses proper PEP 440 / semver comparison (via `packaging`) when both
+    versions parse cleanly — this correctly handles pre-releases like
+    `2.0.0rc1` and build metadata, rather than the previous purely
+    numeric comparator. Falls back to numeric-segment comparison for
+    version strings `packaging` can't parse (e.g. some Go pseudo-versions).
+    """
     if not current or not latest:
         return False
+
+    current_v = _parse_version(current)
+    latest_v = _parse_version(latest)
+    if current_v is not None and latest_v is not None:
+        return latest_v > current_v
+
     return _version_tuple(latest) > _version_tuple(current)

@@ -13,8 +13,26 @@ Docs: https://docs.github.com/en/rest
 
 import base64
 import requests
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 API_ROOT = "https://api.github.com"
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Retry on network-level errors and 5xx responses; not on 4xx
+    (bad token, 404, validation errors, etc — retrying won't help those).
+    """
+    if isinstance(exc, requests.HTTPError):
+        return exc.response is not None and exc.response.status_code >= 500
+    return isinstance(exc, requests.RequestException)
+
+
+_retry_transient = retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
+    retry=retry_if_exception(_is_transient),
+)
 
 
 class GitHubClient:
@@ -26,16 +44,19 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
         })
 
+    @_retry_transient
     def get_default_branch(self, repo: str) -> str:
         r = self.session.get(f"{API_ROOT}/repos/{repo}")
         r.raise_for_status()
         return r.json()["default_branch"]
 
+    @_retry_transient
     def get_ref_sha(self, repo: str, branch: str) -> str:
         r = self.session.get(f"{API_ROOT}/repos/{repo}/git/ref/heads/{branch}")
         r.raise_for_status()
         return r.json()["object"]["sha"]
 
+    @_retry_transient
     def create_branch(self, repo: str, new_branch: str, from_sha: str) -> None:
         r = self.session.post(
             f"{API_ROOT}/repos/{repo}/git/refs",
@@ -45,6 +66,7 @@ class GitHubClient:
         if r.status_code not in (201, 422):
             r.raise_for_status()
 
+    @_retry_transient
     def get_file(self, repo: str, path: str, branch: str):
         """Return (content_str, sha) for a file on a given branch."""
         r = self.session.get(
@@ -55,6 +77,7 @@ class GitHubClient:
         content = base64.b64decode(data["content"]).decode("utf-8")
         return content, data["sha"]
 
+    @_retry_transient
     def update_file(self, repo: str, path: str, branch: str, new_content: str,
                      sha: str, message: str) -> None:
         encoded = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
@@ -69,6 +92,7 @@ class GitHubClient:
         )
         r.raise_for_status()
 
+    @_retry_transient
     def open_pull_request(self, repo: str, branch: str, base: str, title: str,
                            body: str) -> str:
         r = self.session.post(
