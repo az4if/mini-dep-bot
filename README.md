@@ -134,4 +134,3 @@ Questions, bug reports, or integration issues: [az4if@proton.me](mailto:az4if@pr
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
-
