@@ -58,45 +58,65 @@ mini-dep-bot/
    python bot.py
    ```
 
-## Running it automatically
+## Deploying with GitHub Actions
 
-`.github/workflows/dependency-check.yml` runs the bot every Monday via
-GitHub Actions, using the repo's built-in `GITHUB_TOKEN`. In the target
-repo's **Settings → Actions → General**, make sure "Allow GitHub Actions
-to create and approve pull requests" is enabled, or the PR-opening step
-will be rejected.
+This is the intended way to run the bot — no external hosting, no
+timeouts to worry about, and it uses GitHub's own automatic token instead
+of a personal access token you'd have to create and store.
 
-## Running it on Vercel (alternative to GitHub Actions)
+### 1. Push the project to a repo
 
-You can run this on Vercel instead of Actions. `api/check.py` wraps the
-same checking logic behind an HTTP endpoint (Vercel functions must
-respond to requests — they can't run a plain script), and `vercel.json`
-schedules it with Vercel Cron.
+```bash
+cd mini-dep-bot
+git init
+git add .
+git commit -m "Add mini-dep-bot"
+git remote add origin https://github.com/your-username/your-repo.git
+git branch -M main
+git push -u origin main
+```
 
-1. Push this repo to GitHub and import it into Vercel.
-2. In the Vercel project's **Settings → Environment Variables**, add:
-   - `GITHUB_TOKEN` — a token with Contents + Pull requests read/write on the target repo
-   - `TARGET_REPO` — `owner/repo`
-3. Deploy. Vercel will register the cron schedule from `vercel.json`
-   automatically (default: every Monday at 06:00 UTC).
-4. To trigger it manually and check it's working:
-   ```bash
-   curl https://your-project.vercel.app/api/check
-   ```
+This can be a brand-new repo or an existing one — the bot only touches
+whichever of `package.json`, `requirements.txt`, or `go.mod` it finds at
+the root, and skips any that aren't there.
 
-**Things to know:**
+### 2. Allow Actions to open pull requests
 
-- Vercel provisions a `CRON_SECRET` env var automatically and sends it as
-  `Authorization: Bearer <value>` on cron-triggered requests. `api/check.py`
-  checks for this, so manual `curl` calls without it will get a 401 once
-  `CRON_SECRET` exists in your project — that's expected, not a bug.
-- **Hobby plan**: cron jobs can only run once per day (weekly, as configured,
-  is fine), and functions default to a 10s timeout, 60s max — set here via
-  `maxDuration` in `vercel.json`. If a repo has many outdated dependencies,
-  the sequential API calls could approach that limit; Pro raises the max to
-  300s.
-- Unlike the Actions workflow, this needs the env vars set manually in the
-  Vercel dashboard rather than as repo secrets.
+By default, some repos restrict what the built-in Actions token can do.
+Go to your repo's **Settings → Actions → General → Workflow permissions**
+and:
+
+- Select **"Read and write permissions"**
+- Check **"Allow GitHub Actions to create and approve pull requests"**
+
+Without this, the workflow will run but fail at the PR-creation step.
+
+### 3. That's it — no secrets to add
+
+`.github/workflows/dependency-check.yml` already uses GitHub's automatic,
+per-run `secrets.GITHUB_TOKEN` and resolves the target repo itself via
+`${{ github.repository }}`. There's no personal access token to generate
+and no repo secret to configure.
+
+### 4. Run it
+
+- **Automatically:** the workflow runs every Monday at 06:00 UTC, per the
+  `cron` schedule in the workflow file.
+- **Manually, any time:** go to the **Actions** tab → **mini-dep-bot** →
+  **Run workflow**. This button exists because of `workflow_dispatch` in
+  the workflow file.
+
+### 5. Check the results
+
+- **Pull requests** tab — any dependency bumps the bot opened
+- **Actions** tab → the run's logs — a summary of what it checked and
+  either the opened PR links or "everything is up to date"
+
+### Changing the schedule
+
+Edit the `cron` line in `.github/workflows/dependency-check.yml`. It uses
+standard 5-field cron syntax in UTC, e.g. `0 6 * * 1` = every Monday at
+06:00 UTC, `0 0 * * *` = daily at midnight UTC.
 
 ## Limitations
 
