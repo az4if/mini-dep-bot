@@ -3,3 +3,4 @@ packaging==26.2
 python-dotenv==1.2.2
 rich==15.0.0
 tenacity==9.1.4
+tqdm==4.65.0
