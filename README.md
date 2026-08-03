@@ -1,4 +1,4 @@
-# mini-dep-bot 
+# mini-dep-bot
 
 A small, self-built GitHub bot inspired by Renovate and Dependabot. It scans
 a repository's `package.json`, `requirements.txt`, and `go.mod` for outdated
