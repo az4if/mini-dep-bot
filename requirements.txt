@@ -1,5 +1,5 @@
-requests>=2.31.0
-packaging>=23.2
-python-dotenv>=1.0.1
-rich>=13.7.0
-tenacity>=8.2.3
+requests==2.34.2
+packaging==26.2
+python-dotenv==1.2.2
+rich==15.0.0
+tenacity==9.1.4
