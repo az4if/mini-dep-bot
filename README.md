@@ -129,4 +129,4 @@ standard 5-field cron syntax in UTC, e.g. `0 6 * * 1` = every Monday at
 
 ## License
 
-MIT
+This project is licensed under the [MIT License](LICENSE).
