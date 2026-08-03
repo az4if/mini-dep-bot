@@ -1,0 +1,14 @@
+# Optional bot config. Copy this to `.mini-dep-bot.yml` at the root of
+# the target repo to customize what mini-dep-bot touches. Both keys
+# are optional — omit either (or the whole file) to use the defaults
+# (nothing ignored, nothing pinned).
+
+# Packages the bot should never open a PR for, no matter how outdated.
+ignore:
+  - some-noisy-package
+
+# Packages capped to a specific major version — the bot will still
+# pick up minor/patch releases within that major, just not jump past
+# it. Useful for a dependency you've deliberately held back.
+pin:
+  some-package: 2
