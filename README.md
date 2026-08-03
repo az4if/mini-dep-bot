@@ -66,6 +66,38 @@ repo's **Settings → Actions → General**, make sure "Allow GitHub Actions
 to create and approve pull requests" is enabled, or the PR-opening step
 will be rejected.
 
+## Running it on Vercel (alternative to GitHub Actions)
+
+You can run this on Vercel instead of Actions. `api/check.py` wraps the
+same checking logic behind an HTTP endpoint (Vercel functions must
+respond to requests — they can't run a plain script), and `vercel.json`
+schedules it with Vercel Cron.
+
+1. Push this repo to GitHub and import it into Vercel.
+2. In the Vercel project's **Settings → Environment Variables**, add:
+   - `GITHUB_TOKEN` — a token with Contents + Pull requests read/write on the target repo
+   - `TARGET_REPO` — `owner/repo`
+3. Deploy. Vercel will register the cron schedule from `vercel.json`
+   automatically (default: every Monday at 06:00 UTC).
+4. To trigger it manually and check it's working:
+   ```bash
+   curl https://your-project.vercel.app/api/check
+   ```
+
+**Things to know:**
+
+- Vercel provisions a `CRON_SECRET` env var automatically and sends it as
+  `Authorization: Bearer <value>` on cron-triggered requests. `api/check.py`
+  checks for this, so manual `curl` calls without it will get a 401 once
+  `CRON_SECRET` exists in your project — that's expected, not a bug.
+- **Hobby plan**: cron jobs can only run once per day (weekly, as configured,
+  is fine), and functions default to a 10s timeout, 60s max — set here via
+  `maxDuration` in `vercel.json`. If a repo has many outdated dependencies,
+  the sequential API calls could approach that limit; Pro raises the max to
+  300s.
+- Unlike the Actions workflow, this needs the env vars set manually in the
+  Vercel dashboard rather than as repo secrets.
+
 ## Limitations
 
 - Version comparison uses a simple numeric-segment comparator, not full
