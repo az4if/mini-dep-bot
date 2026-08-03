@@ -101,3 +101,18 @@ class GitHubClient:
         )
         r.raise_for_status()
         return r.json()["html_url"]
+
+    @_retry_transient
+    def find_open_pr(self, repo: str, branch: str, base: str) -> str | None:
+        """Return the html_url of an existing open PR for `branch`, or
+        None. Used so re-running the bot updates an already-open PR
+        with a new commit instead of opening a duplicate.
+        """
+        owner = repo.split("/")[0]
+        r = self.session.get(
+            f"{API_ROOT}/repos/{repo}/pulls",
+            params={"head": f"{owner}:{branch}", "base": base, "state": "open"},
+        )
+        r.raise_for_status()
+        results = r.json()
+        return results[0]["html_url"] if results else None
