@@ -3,7 +3,12 @@ name: mini-dep-bot
 on:
   schedule:
     - cron: "0 6 * * 1"   # every Monday at 06:00 UTC
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — report changes without opening PRs"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -25,3 +30,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run }}
