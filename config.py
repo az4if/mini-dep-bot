@@ -10,21 +10,31 @@ Supported keys:
     pin:
       some-package: 2             # never bump past major version 2
 
-Both keys are optional; a missing config file (or a repo with none at
-all) behaves exactly as before — nothing ignored, nothing pinned.
+    automerge: patch              # auto-merge a manifest's grouped PR
+                                   # when every bump in it is patch-level
+                                   # (also accepts: true / "true" / "yes"
+                                   # as an alias for "patch")
+
+All three keys are optional; a missing config file (or a repo with
+none at all) behaves exactly as before — nothing ignored, nothing
+pinned, auto-merge off.
 """
 
 import yaml
 
 CONFIG_PATH = ".mini-dep-bot.yml"
 
+_AUTOMERGE_PATCH_VALUES = {"patch", "true", "yes", "1"}
+
 
 def load_config(client, repo: str, branch: str) -> dict:
-    """Return {"ignore": set(...), "pin": {name: max_major, ...}}."""
+    """Return {"ignore": set(...), "pin": {name: max_major, ...},
+    "automerge_patch": bool}.
+    """
     try:
         content, _ = client.get_file(repo, CONFIG_PATH, branch)
     except Exception:
-        return {"ignore": set(), "pin": {}}
+        return {"ignore": set(), "pin": {}, "automerge_patch": False}
 
     data = yaml.safe_load(content) or {}
 
@@ -37,4 +47,7 @@ def load_config(client, repo: str, branch: str) -> dict:
         except (TypeError, ValueError):
             continue  # malformed entry — skip rather than crash the run
 
-    return {"ignore": ignore, "pin": pin}
+    automerge_raw = str(data.get("automerge", "")).strip().lower()
+    automerge_patch = automerge_raw in _AUTOMERGE_PATCH_VALUES
+
+    return {"ignore": ignore, "pin": pin, "automerge_patch": automerge_patch}
