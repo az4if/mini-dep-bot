@@ -34,6 +34,13 @@ and opens a pull request per manifest bundling every update it finds.
 - No wrapper libraries — talks to the GitHub REST/GraphQL APIs directly
   with `requests`
 
+**Two things worth knowing up front:**
+- Some ecosystem parsing is intentionally narrow (e.g. only certain
+  `Cargo.toml`/`Gemfile` styles — see [Limitations](#limitations) for the
+  exact scope of each).
+- Lockfiles aren't updated automatically, so you'll still need a manual
+  step for `package-lock.json`/`Cargo.lock`/etc. after merging.
+
 ## How it works
 
 1. Reads each supported manifest from a target repo via the GitHub Contents
