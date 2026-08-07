@@ -31,3 +31,55 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_REPO: ${{ github.repository }}
           DRY_RUN: ${{ inputs.dry_run }}
+
+      # bot.py itself only edits manifests via the GitHub API — it has
+      # no checkout or toolchain, and a hand-edited lockfile risks a
+      # stale integrity hash. This step covers that properly using the
+      # real package manager: for every (branch, lockfile) bot.py just
+      # touched (.mini-dep-bot-updates.json), check that branch out,
+      # regenerate the lockfile for real, and push it back if it
+      # changed. ubuntu-latest ships Node/npm, Ruby/Bundler, Go,
+      # Rust/Cargo, PHP/Composer, and pipx out of the box; if your
+      # runner is missing one of these, add the matching
+      # actions/setup-* step above this one.
+      - name: Regenerate lockfiles
+        if: ${{ !inputs.dry_run }}
+        run: |
+          if [ ! -s .mini-dep-bot-updates.json ]; then
+            echo "Nothing to regenerate."
+            exit 0
+          fi
+
+          git config user.name "mini-dep-bot"
+          git config user.email "actions@github.com"
+
+          jq -c '.[]' .mini-dep-bot-updates.json | while read -r entry; do
+            branch=$(echo "$entry" | jq -r '.branch')
+            lockfile=$(echo "$entry" | jq -r '.lockfile // empty')
+            [ -z "$lockfile" ] && continue
+
+            echo "::group::Regenerating $lockfile on $branch"
+            git fetch origin "$branch"
+            git checkout "$branch"
+
+            case "$lockfile" in
+              package-lock.json) npm install --package-lock-only ;;
+              poetry.lock)       pipx run poetry lock --no-update ;;
+              Cargo.lock)        cargo update --workspace ;;
+              Gemfile.lock)      bundle lock ;;
+              go.sum)            go mod tidy ;;
+              composer.lock)     composer update --lock --no-interaction ;;
+              *)                 echo "No regen command for $lockfile — skipping" ;;
+            esac
+
+            if ! git diff --quiet -- "$lockfile" 2>/dev/null; then
+              git add "$lockfile"
+              git commit -m "chore(deps): regenerate $lockfile"
+              git push origin "$branch"
+            else
+              echo "No changes to $lockfile"
+            fi
+
+            git checkout -
+            echo "::endgroup::"
+          done
