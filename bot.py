@@ -13,7 +13,9 @@ Each PR gets:
   - `dependencies` + an ecosystem label (npm/python/go/rust/ruby/php)
   - a note when a bump also closes a known vulnerability (OSV.dev)
   - a changelog/homepage link per dependency, best-effort
-  - a heads-up if a companion lockfile exists and needs regenerating
+  - a lockfile regenerated for real (via the provided GitHub Actions
+    workflow's follow-up step — see LOCKFILES / WORKFLOW_UPDATES_FILE
+    below), or a manual heads-up when run standalone
   - auto-merge enabled, if `.mini-dep-bot.yml` opts in and every bump
     in the PR is patch-level
 
@@ -32,6 +34,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -88,20 +91,31 @@ MANIFEST_LABELS = {
 }
 
 # manifest path -> (companion lockfile name, command to regenerate it).
-# mini-dep-bot only edits the manifest, never the lockfile — actually
-# resolving one correctly means running the real package manager, which
-# is out of scope for an HTTP-API-only bot with no repo checkout, and a
-# naive hand-edit risks producing a lockfile with a stale integrity hash
-# (npm/yarn) or a resolution that doesn't match what's declared. Instead
-# the PR just flags that the lockfile needs regenerating.
+# mini-dep-bot itself only edits the manifest via the GitHub API — it
+# has no repo checkout or toolchain, and correctly resolving a lockfile
+# means running the real package manager (a naive hand-edit risks e.g.
+# a stale npm/yarn integrity hash). The provided GitHub Actions
+# workflow covers this properly instead: bot.py records which
+# (branch, lockfile) pairs changed, and a follow-up step in
+# dependency-check.yml checks out each branch, runs the real command
+# below, and pushes the regenerated lockfile to the same branch/PR —
+# see WORKFLOW_UPDATES_FILE below. Running bot.py standalone (outside
+# that workflow) skips this step, so the PR note still applies there.
 LOCKFILES = {
-    "package.json": ("package-lock.json", "npm install"),
+    "package.json": ("package-lock.json", "npm install --package-lock-only"),
     "pyproject.toml": ("poetry.lock", "poetry lock --no-update"),
-    "Cargo.toml": ("Cargo.lock", "cargo update"),
+    "Cargo.toml": ("Cargo.lock", "cargo update --workspace"),
     "Gemfile": ("Gemfile.lock", "bundle lock"),
     "go.mod": ("go.sum", "go mod tidy"),
-    "composer.json": ("composer.lock", "composer update --lock"),
+    "composer.json": ("composer.lock", "composer update --lock --no-interaction"),
 }
+
+# Where main() writes the list of {"path", "branch", "lockfile"} dicts
+# for manifests that got a real commit this run — read by the
+# "Regenerate lockfiles" step in dependency-check.yml. Only written
+# when non-empty and not dry-run; its absence just means that step has
+# nothing to do.
+WORKFLOW_UPDATES_FILE = os.environ.get("MINI_DEP_BOT_UPDATES_FILE", ".mini-dep-bot-updates.json")
 
 BRANCH_PREFIX = "mini-dep-bot"
 
@@ -157,14 +171,16 @@ def _lockfile_note(client, repo, base_branch, manifest_path):
     if not exists:
         return ""
     return (
-        f"\n\n⚠️ This repo also has `{name}`. mini-dep-bot only updates "
-        f"`{manifest_path}` — regenerate the lockfile locally (e.g. "
-        f"`{command}`) and push it to this branch before merging."
+        f"\n\n⚠️ This repo also has `{name}`. If you're running the provided "
+        f"GitHub Actions workflow, its \"Regenerate lockfiles\" step pushes an "
+        f"updated `{name}` to this branch automatically. Running `bot.py` "
+        f"standalone, or if that step is disabled: regenerate it yourself "
+        f"(e.g. `{command}`) and push it to this branch before merging."
     )
 
 
 def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn, config,
-                    dry_run=False):
+                    dry_run=False, updates_log=None):
     """Bundle every outdated dependency in this manifest into a single
     branch and PR. If a PR for this manifest is already open, push an
     updated commit to it instead of opening a duplicate.
@@ -173,6 +189,10 @@ def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn
     — no branch, commit, PR, label, or auto-merge setting is created —
     and the return value is a human-readable summary rather than a PR
     url.
+
+    When `updates_log` is given, a {"path", "branch", "lockfile"} dict
+    is appended to it whenever a real commit is pushed — see
+    WORKFLOW_UPDATES_FILE and dependency-check.yml's lockfile step.
 
     Returns the PR url (or dry-run summary) if there's anything to
     report, else None.
@@ -230,6 +250,14 @@ def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn
 
     client.update_file(repo, path, branch, updated, fresh_sha, message=message)
 
+    if updates_log is not None:
+        lockfile = LOCKFILES.get(path)
+        updates_log.append({
+            "path": path,
+            "branch": branch,
+            "lockfile": lockfile[0] if lockfile else None,
+        })
+
     if existing_pr:
         pr = existing_pr  # new commit was just pushed to the open PR
     else:
@@ -283,14 +311,22 @@ def main():
         )
 
     all_prs = []
+    updates_log = []
     for path, parse_fn, lookup_fn, bump_fn in MANIFESTS:
         console.print(f"  [dim]scanning[/dim] {path}...")
         pr_url = check_manifest(
             client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn, config,
-            dry_run=dry_run,
+            dry_run=dry_run, updates_log=updates_log,
         )
         if pr_url:
             all_prs.append(pr_url)
+
+    if updates_log and not dry_run:
+        try:
+            with open(WORKFLOW_UPDATES_FILE, "w") as f:
+                json.dump(updates_log, f)
+        except OSError:
+            pass  # best-effort — the workflow's lockfile step just finds nothing to do
 
     if all_prs:
         verb = "Would open/update" if dry_run else "Opened/updated"
