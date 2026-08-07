@@ -21,8 +21,9 @@ and opens a pull request per manifest bundling every update it finds.
   bot updates that same PR with a new commit instead of opening a duplicate
 - Notes in the PR when a bump also closes a known vulnerability (via
   [OSV.dev](https://osv.dev)), links each dependency's changelog/homepage
-  when the registry exposes one, and flags when a companion lockfile needs
-  regenerating
+  when the registry exposes one, and — when run via the provided GitHub
+  Actions workflow — regenerates any companion lockfile for real, using the
+  actual package manager (see [Lockfiles](#lockfiles) below)
 - Optional auto-merge for a PR where every bundled bump is patch-level,
   gated behind `.mini-dep-bot.yml`
 - `--dry-run` (or `DRY_RUN=true`) reports what it would change using only
@@ -35,11 +36,13 @@ and opens a pull request per manifest bundling every update it finds.
   with `requests`
 
 **Two things worth knowing up front:**
-- Some ecosystem parsing is intentionally narrow (e.g. only certain
-  `Cargo.toml`/`Gemfile` styles — see [Limitations](#limitations) for the
-  exact scope of each).
-- Lockfiles aren't updated automatically, so you'll still need a manual
-  step for `package-lock.json`/`Cargo.lock`/etc. after merging.
+- Ecosystem parsing covers the common cases for each format (including
+  Cargo's nested `[dependencies.name]` tables and implicit caret default,
+  and Ruby's pessimistic `~>` operator) but isn't exhaustive — see
+  [Limitations](#limitations) for the exact scope of each.
+- Lockfiles get regenerated for real, but only when run through the
+  provided GitHub Actions workflow (see [Lockfiles](#lockfiles)) — running
+  `bot.py` standalone still leaves that as a manual step.
 
 ## How it works
 
@@ -72,7 +75,7 @@ mini-dep-bot/
 ├── tests/                        # pytest suite (parsers, config, bot, etc.)
 ├── .mini-dep-bot.yml.example     # template for the optional config file
 └── .github/workflows/
-    ├── dependency-check.yml      # runs the bot weekly via GitHub Actions
+    ├── dependency-check.yml      # runs the bot + lockfile regen weekly
     └── tests.yml                 # runs tests/ on push and PR
 ```
 
@@ -175,6 +178,33 @@ Edit the `cron` line in `.github/workflows/dependency-check.yml`. It uses
 standard 5-field cron syntax in UTC, e.g. `0 6 * * 1` = every Monday at
 06:00 UTC, `0 0 * * *` = daily at midnight UTC.
 
+## Lockfiles
+
+`bot.py` itself only ever edits a manifest file via the GitHub API — it
+has no repo checkout or toolchain, and hand-editing a lockfile risks
+producing one with a stale integrity hash or a resolution that doesn't
+match what's declared. So instead, the provided workflow handles this
+properly in a follow-up step that has both:
+
+1. `bot.py` records which `(branch, lockfile)` pairs it actually changed
+   to `.mini-dep-bot-updates.json`.
+2. The workflow's **"Regenerate lockfiles"** step checks out each of those
+   branches and runs the real package manager — `npm install
+   --package-lock-only`, `cargo update`, `bundle lock`, `poetry lock
+   --no-update`, `go mod tidy`, or `composer update --lock` — then pushes
+   the regenerated lockfile back to the same branch if it changed. It ends
+   up as a second commit on the same PR the bot opened.
+
+This relies on `ubuntu-latest` runners already having Node/npm,
+Ruby/Bundler, Go, Rust/Cargo, PHP/Composer, and `pipx` installed, which is
+true of the default GitHub-hosted runner image. If your runner is missing
+one of these, add the matching `actions/setup-*` step before "Regenerate
+lockfiles" in the workflow file.
+
+This step only runs as part of the GitHub Actions workflow. Running
+`python bot.py` standalone updates the manifest but not the lockfile —
+regenerate it yourself with the command above for your ecosystem.
+
 ## Configuration
 
 Drop a `.mini-dep-bot.yml` at the root of the target repo to customize
@@ -216,24 +246,19 @@ nothing pinned, auto-merge off.
   `[tool.poetry.dependencies]` tables and PEP 621's
   `[project] dependencies = [...]` array (only its `==`/`>=`/`~=` entries —
   same reasoning as `requirements.txt` above).
-- `Cargo.toml` only understands the inline `[dependencies]` /
-  `[dev-dependencies]` / `[build-dependencies]` style, not nested
-  `[dependencies.name]` tables. A bare version with no operator (e.g.
-  `serde = "1.0.152"`) is Cargo's default caret requirement, but this bot
-  compares it as an exact pin rather than modeling that implicit range.
-- `Gemfile` only bumps `gem "name", "version"` lines with an explicit
-  version constraint; unpinned or `git:`/`path:`-sourced gems are skipped.
-  Ruby's pessimistic `~>` operator is compared numerically, not with true
-  pessimistic-constraint range logic.
-- **Lockfiles aren't regenerated.** `package-lock.json`, `poetry.lock`,
-  `Cargo.lock`, `Gemfile.lock`, `go.sum`, and `composer.lock` all encode a
-  fully resolved dependency graph with integrity hashes — correctly
-  updating one means running the actual package manager, which needs a
-  real repo checkout and toolchain this bot (deliberately scoped to the
-  GitHub API only, no local checkout) doesn't have. A naive hand-edit risks
-  a broken lockfile (e.g. a stale integrity hash). Instead, the bot detects
-  a companion lockfile and adds a note to the PR body naming the command to
-  regenerate it.
+- `Cargo.toml` understands both the inline `[dependencies]` style and
+  nested `[dependencies.name]` tables. A bare version with no operator
+  (e.g. `serde = "1.0.152"`) is normalized to Cargo's actual default —
+  caret semantics — rather than compared as an exact pin.
+- `Gemfile` bumps `gem "name", "version"` lines using an exact version, a
+  `>=` floor, or Ruby's pessimistic `~>` operator (compared with its real
+  range semantics — equivalent to PEP 440's `~=`). `<=`, `<`, and `!=` are
+  left alone (explicit ceiling/exclusion, same reasoning as
+  `requirements.txt`), as are unpinned or `git:`/`path:`-sourced gems —
+  there's no registry version to compare those against.
+- **Lockfiles aren't hand-edited** — see [Lockfiles](#lockfiles) above for
+  how they get regenerated for real when run via the provided workflow,
+  and what still requires a manual step outside of it.
 - The `automerge` config only ever asks GitHub to auto-merge — it never
   bypasses branch protection or required status checks, and does nothing
   if the repo's "Allow auto-merge" setting is off.
