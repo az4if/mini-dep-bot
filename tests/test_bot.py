@@ -123,6 +123,39 @@ class TestCheckManifest:
         body = client.open_pull_request.call_args.kwargs["body"]
         assert "package-lock.json" in body
 
+    def test_updates_log_records_branch_and_lockfile_for_workflow_step(self):
+        client = self._client('{"dependencies": {"lodash": "4.17.0"}}', lockfile_exists=True)
+        client.open_pull_request.return_value = _pr(5, "PR_5")
+        updates_log = []
+
+        with patch("bot.homepage_url", return_value=None), \
+             patch("bot.security.fixed_vulnerabilities", return_value=[]):
+            bot.check_manifest(
+                client, "x/y", "main", "package.json", parse_package_json,
+                lambda name, max_major=None: "4.18.0", bump_package_json,
+                {"ignore": set(), "pin": {}, "automerge_patch": False},
+                updates_log=updates_log,
+            )
+
+        assert updates_log == [{
+            "path": "package.json",
+            "branch": "mini-dep-bot/package-json/updates",
+            "lockfile": "package-lock.json",
+        }]
+
+    def test_updates_log_untouched_when_nothing_to_update(self):
+        client = self._client('{"dependencies": {"lodash": "4.18.0"}}')
+        updates_log = []
+
+        bot.check_manifest(
+            client, "x/y", "main", "package.json", parse_package_json,
+            lambda name, max_major=None: "4.18.0", bump_package_json,  # already current
+            {"ignore": set(), "pin": {}, "automerge_patch": False},
+            updates_log=updates_log,
+        )
+
+        assert updates_log == []
+
     def test_no_updates_returns_none_and_touches_nothing(self):
         client = self._client('{"dependencies": {"lodash": "4.18.0"}}')
 
