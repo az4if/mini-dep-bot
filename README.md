@@ -26,11 +26,20 @@ and opens a pull request per manifest bundling every update it finds.
   actual package manager (see [Lockfiles](#lockfiles) below)
 - Optional auto-merge for a PR where every bundled bump is patch-level,
   gated behind `.mini-dep-bot.yml`
+- Optional combined mode: one PR for every manifest instead of one PR per
+  manifest, via `.mini-dep-bot.yml`'s `combined_pr: true`
+- A `# mini-dep-bot: ignore` comment on any dependency line excludes it,
+  no config file edit required (see [Ignoring a single
+  dependency](#ignoring-a-single-dependency))
+- A readable job summary in the GitHub Actions UI (`$GITHUB_STEP_SUMMARY`)
+  in addition to console logs
+- A companion workflow deletes a mini-dep-bot branch once its PR merges
 - `--dry-run` (or `DRY_RUN=true`) reports what it would change using only
   read-only API calls — no branch, commit, PR, label, or auto-merge setting
   gets created or changed
 - Optional `.mini-dep-bot.yml` config to ignore specific packages, pin one
-  to a max major version, or opt into auto-merge
+  to a max major version, opt into auto-merge, or combine every manifest
+  into one PR
 - Runs on demand or on a schedule via GitHub Actions
 - No wrapper libraries — talks to the GitHub REST/GraphQL APIs directly
   with `requests`
@@ -76,6 +85,7 @@ mini-dep-bot/
 ├── .mini-dep-bot.yml.example     # template for the optional config file
 └── .github/workflows/
     ├── dependency-check.yml      # runs the bot + lockfile regen weekly
+    ├── cleanup-merged-branches.yml  # deletes a bot branch once its PR merges
     └── tests.yml                 # runs tests/ on push and PR
 ```
 
@@ -154,7 +164,8 @@ ignores the auto-merge request (the bot logs this as a no-op, not an error).
 `.github/workflows/dependency-check.yml` already uses GitHub's automatic,
 per-run `secrets.GITHUB_TOKEN` and resolves the target repo itself via
 `${{ github.repository }}`. There's no personal access token to generate
-and no repo secret to configure.
+and no repo secret to configure. `cleanup-merged-branches.yml` uses the
+same automatic token — nothing extra to set up for it either.
 
 ### 4. Run it
 
@@ -169,8 +180,14 @@ and no repo secret to configure.
 
 - **Pull requests** tab — any dependency bumps the bot opened, labeled by
   ecosystem
-- **Actions** tab → the run's logs — a summary of what it checked and
-  either the opened PR links or "everything is up to date"
+- **Actions** tab → the run → its **Summary** — a readable breakdown of
+  what was checked, the active config, and the PRs opened/updated
+  ($GITHUB_STEP_SUMMARY), in addition to the full console logs on the
+  same page
+- Once a bot PR merges, **cleanup-merged-branches.yml** deletes its branch
+  automatically (skip this by turning off/deleting that workflow file — it's
+  redundant if the repo already has **Settings → General → Automatically
+  delete head branches** turned on for everything)
 
 ### Changing the schedule
 
@@ -209,7 +226,7 @@ regenerate it yourself with the command above for your ecosystem.
 
 Drop a `.mini-dep-bot.yml` at the root of the target repo to customize
 what the bot touches (see `.mini-dep-bot.yml.example` for a template).
-All three keys are optional:
+All four keys are optional:
 
 ```yaml
 ignore:
@@ -219,13 +236,48 @@ pin:
   some-package: 2          # stays on major version 2 — picks up
                             # minor/patch releases, not major bumps
 
-automerge: patch           # auto-merge a manifest's PR once checks
-                            # pass, but only when every bump in it is
-                            # patch-level (also accepts true/yes)
+automerge: patch           # auto-merge a PR once checks pass, but
+                            # only when every bump in it is patch-level
+                            # (also accepts true/yes)
+
+combined_pr: true          # one PR for every manifest instead of one
+                            # PR per manifest
 ```
 
 No config file at all means the previous behavior: nothing ignored,
-nothing pinned, auto-merge off.
+nothing pinned, auto-merge off, one PR per manifest.
+
+## Ignoring a single dependency
+
+For a one-off "don't touch this" that doesn't need a `.mini-dep-bot.yml`
+edit, add a `mini-dep-bot: ignore` comment on the same line as the
+dependency. The whole line is skipped by the parser — the bot won't see
+it at all, so it can't be bumped or counted toward anything.
+
+```
+# requirements.txt
+requests==2.31.0  # mini-dep-bot: ignore
+```
+```json
+// package.json — not supported, JSON has no comment syntax.
+// Use .mini-dep-bot.yml's `ignore:` list instead.
+```
+```toml
+# pyproject.toml / Cargo.toml
+serde = "1.0.152"  # mini-dep-bot: ignore
+```
+```ruby
+# Gemfile
+gem "rails", "7.1.2"  # mini-dep-bot: ignore
+```
+```go
+// go.mod
+github.com/some/module v1.2.3 // mini-dep-bot: ignore
+```
+
+This works for every format that has a comment syntax. `package.json` and
+`composer.json` are JSON, which doesn't support comments — use
+`.mini-dep-bot.yml`'s `ignore:` list for those instead.
 
 ## Limitations
 
@@ -236,8 +288,14 @@ nothing pinned, auto-merge off.
 - Range-awareness for `^`/`~` (npm/Poetry) is an approximation, not a full
   semver-range implementation — it doesn't special-case every edge (e.g. a
   bare `~1` with no minor segment).
-- Grouping is per-manifest, not per-repo — a repo with outdated npm *and*
-  pip packages gets two PRs, one per manifest, not one combined PR.
+- Grouping is per-manifest by default — a repo with outdated npm *and* pip
+  packages gets two PRs, one per manifest. Set `combined_pr: true` in
+  `.mini-dep-bot.yml` for one PR across every manifest instead (still one
+  commit per manifest that changed, just bundled into a single PR).
+- The `# mini-dep-bot: ignore` inline comment only works on formats with a
+  comment syntax. `package.json` and `composer.json` are JSON, which
+  doesn't support comments — use `.mini-dep-bot.yml`'s `ignore:` list for
+  those.
 - `requirements.txt` only tracks `==`, `>=`, and `~=` pins. `<=`, `<`, and
   `!=` are left alone — those represent an explicit ceiling or exclusion,
   and bumping past one would silently violate a constraint that's there on

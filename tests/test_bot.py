@@ -180,3 +180,176 @@ class TestCheckManifest:
         )
 
         assert url is None
+
+
+def _get_file_side_effect(content_map):
+    """A client.get_file side_effect that serves fixed content per
+    manifest path regardless of which ref/branch is asked for (as if
+    a freshly created branch has no prior differences from base), and
+    raises for any path not in the map (manifest not present).
+    """
+    def _get_file(repo, path, ref):
+        if path not in content_map:
+            raise Exception("404 not found")
+        return content_map[path], f"sha-{path}"
+    return _get_file
+
+
+class TestRunCombined:
+    def _config(self, **overrides):
+        return {"ignore": set(), "pin": {}, "automerge_patch": False, "combined_pr": True, **overrides}
+
+    def test_bundles_multiple_manifests_into_one_pr(self):
+        from parsers import parse_requirements_txt, bump_requirements_txt
+
+        client = MagicMock()
+        client.get_file.side_effect = _get_file_side_effect({
+            "package.json": '{"dependencies": {"lodash": "4.17.0"}}',
+            "requirements.txt": "requests==2.31.0\n",
+        })
+        client.find_open_pr.return_value = None
+        client.get_ref_sha.return_value = "ref-sha"
+        client.file_exists.return_value = False
+        client.open_pull_request.return_value = _pr(10, "PR_10")
+
+        test_manifests = [
+            ("package.json", parse_package_json, lambda name, max_major=None: "4.18.0", bump_package_json),
+            ("requirements.txt", parse_requirements_txt, lambda name, max_major=None: "2.34.2", bump_requirements_txt),
+        ]
+
+        with patch.object(bot, "MANIFESTS", test_manifests), \
+             patch("bot.homepage_url", return_value=None), \
+             patch("bot.security.fixed_vulnerabilities", return_value=[]):
+            url = bot.run_combined(client, "x/y", "main", self._config())
+
+        assert url == "https://github.com/x/y/pull/10"
+        assert client.update_file.call_count == 2  # one commit per touched manifest
+        client.open_pull_request.assert_called_once()
+        client.create_branch.assert_called_once()
+        assert client.create_branch.call_args.args[1] == "mini-dep-bot/all-updates"
+
+        body = client.open_pull_request.call_args.kwargs["body"]
+        assert "`package.json`" in body and "`requirements.txt`" in body
+
+        labels = client.add_labels.call_args.args[2]
+        assert set(labels) == {"dependencies", "npm", "python"}
+
+    def test_no_updates_anywhere_returns_none(self):
+        client = MagicMock()
+        client.get_file.side_effect = _get_file_side_effect({
+            "package.json": '{"dependencies": {"lodash": "4.18.0"}}',
+        })
+        test_manifests = [
+            ("package.json", parse_package_json, lambda name, max_major=None: "4.18.0", bump_package_json),
+        ]
+
+        with patch.object(bot, "MANIFESTS", test_manifests):
+            url = bot.run_combined(client, "x/y", "main", self._config())
+
+        assert url is None
+        client.create_branch.assert_not_called()
+
+    def test_reuses_existing_open_pr(self):
+        client = MagicMock()
+        client.get_file.side_effect = _get_file_side_effect({
+            "package.json": '{"dependencies": {"lodash": "4.17.0"}}',
+        })
+        client.find_open_pr.return_value = _pr(20, "PR_20")
+        client.get_ref_sha.return_value = "ref-sha"
+        client.file_exists.return_value = False
+        test_manifests = [
+            ("package.json", parse_package_json, lambda name, max_major=None: "4.18.0", bump_package_json),
+        ]
+
+        with patch.object(bot, "MANIFESTS", test_manifests), \
+             patch("bot.homepage_url", return_value=None), \
+             patch("bot.security.fixed_vulnerabilities", return_value=[]):
+            url = bot.run_combined(client, "x/y", "main", self._config())
+
+        assert url == "https://github.com/x/y/pull/20"
+        client.open_pull_request.assert_not_called()
+
+    def test_automerge_only_when_every_manifest_is_patch_level(self):
+        from parsers import parse_requirements_txt, bump_requirements_txt
+
+        client = MagicMock()
+        client.get_file.side_effect = _get_file_side_effect({
+            "package.json": '{"dependencies": {"lodash": "4.17.0"}}',
+            "requirements.txt": "requests==2.31.0\n",
+        })
+        client.find_open_pr.return_value = None
+        client.get_ref_sha.return_value = "ref-sha"
+        client.file_exists.return_value = False
+        client.open_pull_request.return_value = _pr(30, "PR_30")
+
+        # package.json gets a patch bump, requirements.txt gets a minor bump
+        test_manifests = [
+            ("package.json", parse_package_json, lambda name, max_major=None: "4.17.9", bump_package_json),
+            ("requirements.txt", parse_requirements_txt, lambda name, max_major=None: "2.32.0", bump_requirements_txt),
+        ]
+
+        with patch.object(bot, "MANIFESTS", test_manifests), \
+             patch("bot.homepage_url", return_value=None), \
+             patch("bot.security.fixed_vulnerabilities", return_value=[]):
+            bot.run_combined(client, "x/y", "main", self._config(automerge_patch=True))
+
+        client.enable_auto_merge.assert_not_called()  # one manifest wasn't patch-level
+
+    def test_dry_run_touches_nothing(self):
+        client = MagicMock()
+        client.get_file.side_effect = _get_file_side_effect({
+            "package.json": '{"dependencies": {"lodash": "4.17.0"}}',
+        })
+        client.find_open_pr.return_value = None
+        test_manifests = [
+            ("package.json", parse_package_json, lambda name, max_major=None: "4.18.0", bump_package_json),
+        ]
+
+        with patch.object(bot, "MANIFESTS", test_manifests):
+            result = bot.run_combined(client, "x/y", "main", self._config(), dry_run=True)
+
+        assert result is not None
+        client.create_branch.assert_not_called()
+        client.update_file.assert_not_called()
+        client.open_pull_request.assert_not_called()
+
+
+class TestWriteStepSummary:
+    def test_writes_nothing_outside_github_actions(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+        # Should simply return without raising, and without needing a real file.
+        bot._write_step_summary(
+            "x/y", "main", False,
+            {"ignore": set(), "pin": {}, "automerge_patch": False, "combined_pr": False},
+            [],
+        )
+
+    def test_writes_summary_when_env_var_set(self, tmp_path, monkeypatch):
+        summary_file = tmp_path / "summary.md"
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+
+        bot._write_step_summary(
+            "x/y", "main", False,
+            {"ignore": {"noisy-pkg"}, "pin": {"some-pkg": 2}, "automerge_patch": True, "combined_pr": False},
+            ["https://github.com/x/y/pull/1", "https://github.com/x/y/pull/2"],
+        )
+
+        content = summary_file.read_text()
+        assert "x/y" in content and "main" in content
+        assert "noisy-pkg" in content
+        assert "some-pkg → v2" in content
+        assert "Auto-merge: patch-only bumps" in content
+        assert "https://github.com/x/y/pull/1" in content
+        assert "https://github.com/x/y/pull/2" in content
+
+    def test_up_to_date_message_when_no_prs(self, tmp_path, monkeypatch):
+        summary_file = tmp_path / "summary.md"
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+
+        bot._write_step_summary(
+            "x/y", "main", False,
+            {"ignore": set(), "pin": {}, "automerge_patch": False, "combined_pr": False},
+            [],
+        )
+
+        assert "up to date" in summary_file.read_text()

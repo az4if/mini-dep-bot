@@ -10,14 +10,17 @@ Supported keys:
     pin:
       some-package: 2             # never bump past major version 2
 
-    automerge: patch              # auto-merge a manifest's grouped PR
-                                   # when every bump in it is patch-level
-                                   # (also accepts: true / "true" / "yes"
-                                   # as an alias for "patch")
+    automerge: patch              # auto-merge a PR when every bump in
+                                   # it is patch-level (also accepts:
+                                   # true / "true" / "yes" as an alias
+                                   # for "patch")
 
-All three keys are optional; a missing config file (or a repo with
-none at all) behaves exactly as before — nothing ignored, nothing
-pinned, auto-merge off.
+    combined_pr: true             # one PR for every manifest instead
+                                   # of one PR per manifest
+
+All four keys are optional; a missing config file (or a repo with none
+at all) behaves exactly as before — nothing ignored, nothing pinned,
+auto-merge off, one PR per manifest.
 """
 
 import yaml
@@ -25,16 +28,17 @@ import yaml
 CONFIG_PATH = ".mini-dep-bot.yml"
 
 _AUTOMERGE_PATCH_VALUES = {"patch", "true", "yes", "1"}
+_TRUTHY_VALUES = {"true", "yes", "1"}
 
 
 def load_config(client, repo: str, branch: str) -> dict:
     """Return {"ignore": set(...), "pin": {name: max_major, ...},
-    "automerge_patch": bool}.
+    "automerge_patch": bool, "combined_pr": bool}.
     """
     try:
         content, _ = client.get_file(repo, CONFIG_PATH, branch)
     except Exception:
-        return {"ignore": set(), "pin": {}, "automerge_patch": False}
+        return {"ignore": set(), "pin": {}, "automerge_patch": False, "combined_pr": False}
 
     data = yaml.safe_load(content) or {}
 
@@ -50,4 +54,15 @@ def load_config(client, repo: str, branch: str) -> dict:
     automerge_raw = str(data.get("automerge", "")).strip().lower()
     automerge_patch = automerge_raw in _AUTOMERGE_PATCH_VALUES
 
-    return {"ignore": ignore, "pin": pin, "automerge_patch": automerge_patch}
+    combined_raw = data.get("combined_pr", False)
+    combined_pr = (
+        combined_raw is True
+        or str(combined_raw).strip().lower() in _TRUTHY_VALUES
+    )
+
+    return {
+        "ignore": ignore,
+        "pin": pin,
+        "automerge_patch": automerge_patch,
+        "combined_pr": combined_pr,
+    }

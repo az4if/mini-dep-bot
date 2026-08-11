@@ -15,6 +15,14 @@ dependency on a TOML writer, and it can't reformat or drop comments
 elsewhere in the file the way a full TOML parse-then-serialize would.
 JSON has no comments to lose, so package.json/composer.json just
 round-trip through `json`.
+
+Every format that has line comments also supports a manifest-level
+ignore: put `mini-dep-bot: ignore` in a comment on the same line as a
+dependency and that line is skipped by the parser entirely — a
+lighter alternative to `.mini-dep-bot.yml`'s `ignore:` list for a
+one-off "don't touch this" (e.g. `requests==2.31.0  # mini-dep-bot:
+ignore`). package.json and composer.json are JSON, which has no
+comment syntax to hang this off of — use `.mini-dep-bot.yml` for those.
 """
 
 import json
@@ -22,6 +30,18 @@ import re
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
+
+# A trailing comment anywhere on a dependency line marks it as
+# manually excluded, e.g. `requests==2.31.0  # mini-dep-bot: ignore`.
+# Checked as a plain substring rather than parsed per-format comment
+# syntax (#, //, etc) — simpler, and nothing else would realistically
+# contain this exact phrase on a dependency line.
+IGNORE_MARKER = "mini-dep-bot: ignore"
+
+
+def _is_ignored_line(line: str) -> bool:
+    return IGNORE_MARKER in line
+
 
 # Matches a TOML section header line, e.g. "[tool.poetry.dependencies]"
 _TOML_SECTION_RE = re.compile(r"^\[.*\]\s*$")
@@ -94,7 +114,7 @@ def parse_requirements_txt(content: str) -> dict:
     deps = {}
     for line in content.splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not line or line.startswith("#") or _is_ignored_line(line):
             continue
         match = _REQ_LINE.match(line)
         if match:
@@ -138,7 +158,7 @@ def parse_go_mod(content: str) -> dict:
             continue
 
         parts = candidate.split()
-        if len(parts) >= 2 and parts[1].startswith("v"):
+        if len(parts) >= 2 and parts[1].startswith("v") and not _is_ignored_line(line):
             deps[parts[0]] = parts[1]
     return deps
 
@@ -208,6 +228,8 @@ def _pep621_dependencies(content: str) -> dict:
     start, end = block
     deps = {}
     for raw in lines[start:end + 1]:
+        if _is_ignored_line(raw):
+            continue
         for m in _QUOTED_RE.finditer(raw):
             item = m.group(1) if m.group(1) is not None else m.group(2)
             parsed = _parse_pep508_item(item)
@@ -247,7 +269,7 @@ def parse_pyproject_toml(content: str) -> dict:
         if _TOML_SECTION_RE.match(stripped):
             in_section = bool(_POETRY_SECTION_RE.match(stripped))
             continue
-        if not in_section or not stripped or stripped.startswith("#"):
+        if not in_section or not stripped or stripped.startswith("#") or _is_ignored_line(stripped):
             continue
         match = _toml_dep_line_match(stripped)
         if not match:
@@ -324,10 +346,10 @@ def parse_cargo_toml(content: str) -> dict:
             continue
         if nested_name:
             version_match = _TOML_VERSION_KEY_RE.match(stripped)
-            if version_match:
+            if version_match and not _is_ignored_line(stripped):
                 deps[nested_name] = _cargo_normalize_version(version_match.group(1))
             continue
-        if not in_section or not stripped or stripped.startswith("#"):
+        if not in_section or not stripped or stripped.startswith("#") or _is_ignored_line(stripped):
             continue
         match = _toml_dep_line_match(stripped)
         if match:
@@ -402,7 +424,7 @@ def parse_gemfile(content: str) -> dict:
     deps = {}
     for raw_line in content.splitlines():
         stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped or stripped.startswith("#") or _is_ignored_line(stripped):
             continue
         match = _GEM_LINE_RE.match(stripped)
         if not match:
