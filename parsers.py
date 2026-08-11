@@ -15,6 +15,14 @@ dependency on a TOML writer, and it can't reformat or drop comments
 elsewhere in the file the way a full TOML parse-then-serialize would.
 JSON has no comments to lose, so package.json/composer.json just
 round-trip through `json`.
+
+Every format that has line comments also supports a manifest-level
+ignore: put `mini-dep-bot: ignore` in a comment on the same line as a
+dependency and that line is skipped by the parser entirely — a
+lighter alternative to `.mini-dep-bot.yml`'s `ignore:` list for a
+one-off "don't touch this" (e.g. `requests==2.31.0  # mini-dep-bot:
+ignore`). package.json and composer.json are JSON, which has no
+comment syntax to hang this off of — use `.mini-dep-bot.yml` for those.
 """
 
 import json
@@ -22,6 +30,18 @@ import re
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
+
+# A trailing comment anywhere on a dependency line marks it as
+# manually excluded, e.g. `requests==2.31.0  # mini-dep-bot: ignore`.
+# Checked as a plain substring rather than parsed per-format comment
+# syntax (#, //, etc) — simpler, and nothing else would realistically
+# contain this exact phrase on a dependency line.
+IGNORE_MARKER = "mini-dep-bot: ignore"
+
+
+def _is_ignored_line(line: str) -> bool:
+    return IGNORE_MARKER in line
+
 
 # Matches a TOML section header line, e.g. "[tool.poetry.dependencies]"
 _TOML_SECTION_RE = re.compile(r"^\[.*\]\s*$")
@@ -94,7 +114,7 @@ def parse_requirements_txt(content: str) -> dict:
     deps = {}
     for line in content.splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not line or line.startswith("#") or _is_ignored_line(line):
             continue
         match = _REQ_LINE.match(line)
         if match:
@@ -138,7 +158,7 @@ def parse_go_mod(content: str) -> dict:
             continue
 
         parts = candidate.split()
-        if len(parts) >= 2 and parts[1].startswith("v"):
+        if len(parts) >= 2 and parts[1].startswith("v") and not _is_ignored_line(line):
             deps[parts[0]] = parts[1]
     return deps
 
@@ -208,6 +228,8 @@ def _pep621_dependencies(content: str) -> dict:
     start, end = block
     deps = {}
     for raw in lines[start:end + 1]:
+        if _is_ignored_line(raw):
+            continue
         for m in _QUOTED_RE.finditer(raw):
             item = m.group(1) if m.group(1) is not None else m.group(2)
             parsed = _parse_pep508_item(item)
@@ -247,7 +269,7 @@ def parse_pyproject_toml(content: str) -> dict:
         if _TOML_SECTION_RE.match(stripped):
             in_section = bool(_POETRY_SECTION_RE.match(stripped))
             continue
-        if not in_section or not stripped or stripped.startswith("#"):
+        if not in_section or not stripped or stripped.startswith("#") or _is_ignored_line(stripped):
             continue
         match = _toml_dep_line_match(stripped)
         if not match:
@@ -284,39 +306,74 @@ def bump_pyproject_toml(content: str, name: str, new_version: str) -> str:
 
 _CARGO_SECTION_RE = re.compile(r"^\[(?:dependencies|dev-dependencies|build-dependencies)\]\s*$")
 
+# `[dependencies.serde]` / `[dev-dependencies.serde]` style nested table.
+_CARGO_NESTED_SECTION_RE = re.compile(
+    r"^\[(?:dependencies|dev-dependencies|build-dependencies)\.([A-Za-z0-9_\-]+)\]\s*$"
+)
+_TOML_VERSION_KEY_RE = re.compile(r'^version\s*=\s*"([^"]*)"')
+
+
+def _cargo_normalize_version(raw: str) -> str:
+    """Cargo treats an unprefixed version requirement as caret by
+    default — `serde = "1.0.152"` means the same thing as
+    `serde = "^1.0.152"` (https://doc.rust-lang.org/cargo/reference/
+    specifying-dependencies.html#caret-requirements). This normalizes
+    a bare version to carry that implicit `^` so `is_outdated` applies
+    real caret-range logic instead of treating it as an exact pin.
+    Anything that already starts with an explicit operator (^, ~, =,
+    <, >, *) is left untouched.
+    """
+    return raw if (raw and raw[0] in "^~=<>*") else f"^{raw}"
+
 
 def parse_cargo_toml(content: str) -> dict:
     """Return {name: version} from `[dependencies]`, `[dev-dependencies]`,
-    and `[build-dependencies]` sections.
-
-    The `[dependencies.name]` nested-table style isn't handled — only
-    the inline `name = "..."` / `name = { version = "...", ... }` style.
+    and `[build-dependencies]` sections — both the inline
+    `name = "..."` / `name = { version = "...", ... }` style and the
+    nested `[dependencies.name]` table style with its own `version = "..."`
+    line. Bare (unprefixed) versions are normalized to carry Cargo's
+    implicit caret default (see `_cargo_normalize_version`).
     """
     deps = {}
     in_section = False
+    nested_name = None
     for raw_line in content.splitlines():
         stripped = raw_line.strip()
         if _TOML_SECTION_RE.match(stripped):
             in_section = bool(_CARGO_SECTION_RE.match(stripped))
+            nested_match = _CARGO_NESTED_SECTION_RE.match(stripped)
+            nested_name = nested_match.group(1) if nested_match else None
             continue
-        if not in_section or not stripped or stripped.startswith("#"):
+        if nested_name:
+            version_match = _TOML_VERSION_KEY_RE.match(stripped)
+            if version_match and not _is_ignored_line(stripped):
+                deps[nested_name] = _cargo_normalize_version(version_match.group(1))
+            continue
+        if not in_section or not stripped or stripped.startswith("#") or _is_ignored_line(stripped):
             continue
         match = _toml_dep_line_match(stripped)
         if match:
-            deps[match[0]] = match[1]
+            deps[match[0]] = _cargo_normalize_version(match[1])
     return deps
 
 
 def bump_cargo_toml(content: str, name: str, new_version: str) -> str:
     out = []
     in_section = False
+    nested_name = None
     for raw_line in content.splitlines():
         stripped = raw_line.strip()
         if _TOML_SECTION_RE.match(stripped):
             in_section = bool(_CARGO_SECTION_RE.match(stripped))
+            nested_match = _CARGO_NESTED_SECTION_RE.match(stripped)
+            nested_name = nested_match.group(1) if nested_match else None
             out.append(raw_line)
             continue
-        if in_section:
+        if nested_name == name:
+            version_match = _TOML_VERSION_KEY_RE.match(stripped)
+            if version_match:
+                raw_line = _bump_toml_line(raw_line, version_match.group(1), new_version)
+        elif in_section:
             match = _toml_dep_line_match(stripped)
             if match and match[0] == name:
                 raw_line = _bump_toml_line(raw_line, match[1], new_version)
@@ -327,22 +384,55 @@ def bump_cargo_toml(content: str, name: str, new_version: str) -> str:
 # --------------------------------------------------------------------- Gemfile
 
 _GEM_LINE_RE = re.compile(r'^gem\s+[\'"]([A-Za-z0-9_.\-]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]')
+_GEM_OP_RE = re.compile(r'^(~>|>=|<=|!=|<|>)\s*')
+
+
+def _normalize_gem_constraint(raw: str):
+    """Translate a Gemfile version constraint into this project's
+    internal op+version spec so it flows through the same range-aware
+    `is_outdated` logic as the other ecosystems, or None to skip it.
+
+    Ruby's pessimistic `~>` operator has identical semantics to PEP
+    440's `~=` — both lock everything but the last given segment
+    (`~> 2.2` allows up to but not including 3.0; `~> 2.2.3` allows up
+    to but not including 2.3.0) — so it maps straight across onto the
+    existing `~=` handling. `>=` maps straight across too. `<=`, `<`,
+    `!=`, and bare `>` represent an explicit ceiling or exclusion the
+    person put there on purpose — same reasoning as requirements.txt's
+    skip list — so those return None and the gem is left untouched.
+    """
+    match = _GEM_OP_RE.match(raw)
+    if not match:
+        return raw  # bare version, e.g. "7.1.2" -> exact pin
+    op, rest = match.group(1), raw[match.end():]
+    if op == "~>":
+        return f"~={rest}"
+    if op == ">=":
+        return f">={rest}"
+    return None
 
 
 def parse_gemfile(content: str) -> dict:
-    """Return {name: version} for `gem "name", "version"` lines with an
-    explicit version constraint. Unpinned lines (`gem "name"`) and
-    lines with a `git:`/`path:` source are skipped — there's no
-    registry version to compare those against.
+    """Return {name: version} for `gem "name", "version"` lines with a
+    constraint mini-dep-bot understands: an exact version, a `>=`
+    floor, or Ruby's pessimistic `~>` operator (see
+    `_normalize_gem_constraint`). Unpinned lines (`gem "name"`),
+    `git:`/`path:`-sourced gems (no registry version to compare
+    against), and explicit ceilings/exclusions (`<=`, `<`, `!=`, `>`)
+    are left alone.
     """
     deps = {}
     for raw_line in content.splitlines():
         stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped or stripped.startswith("#") or _is_ignored_line(stripped):
             continue
         match = _GEM_LINE_RE.match(stripped)
-        if match:
-            deps[match.group(1)] = match.group(2)
+        if not match:
+            continue
+        name, raw_constraint = match.groups()
+        normalized = _normalize_gem_constraint(raw_constraint)
+        if normalized is not None:
+            deps[name] = normalized
     return deps
 
 

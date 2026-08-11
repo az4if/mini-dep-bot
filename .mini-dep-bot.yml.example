@@ -1,9 +1,13 @@
 # Optional bot config. Copy this to `.mini-dep-bot.yml` at the root of
-# the target repo to customize what mini-dep-bot touches. All three
+# the target repo to customize what mini-dep-bot touches. All four
 # keys are optional — omit any (or the whole file) to use the
-# defaults (nothing ignored, nothing pinned, auto-merge off).
+# defaults (nothing ignored, nothing pinned, auto-merge off, one PR
+# per manifest).
 
 # Packages the bot should never open a PR for, no matter how outdated.
+# For a one-off exclusion you don't want in this file at all, a
+# `# mini-dep-bot: ignore` comment on the dependency's own line in the
+# manifest works too — see the README's "Ignoring a single dependency".
 ignore:
   - some-noisy-package
 
@@ -13,10 +17,16 @@ ignore:
 pin:
   some-package: 2
 
-# Auto-merge a manifest's PR once GitHub's required checks pass, but
-# only when every bump bundled into it is patch-level (any major/minor
-# bump in the batch disables this for that PR). Requires the repo's
-# "Allow auto-merge" setting to be turned on — this doesn't bypass
-# branch protection or CI, it just queues the merge for when checks
-# succeed. Accepts "patch" (or true/yes as aliases); omit for off.
+# Auto-merge a PR once GitHub's required checks pass, but only when
+# every bump bundled into it is patch-level (any major/minor bump in
+# the batch disables this for that PR). Requires the repo's "Allow
+# auto-merge" setting to be turned on — this doesn't bypass branch
+# protection or CI, it just queues the merge for when checks succeed.
+# Accepts "patch" (or true/yes as aliases); omit for off.
 automerge: patch
+
+# One PR bundling every manifest's updates instead of one PR per
+# manifest. Still one commit per manifest that changed (the GitHub
+# Contents API can only write one file per commit), but a single PR
+# either way. Omit or set false for the default (one PR per manifest).
+combined_pr: true

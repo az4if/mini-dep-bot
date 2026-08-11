@@ -83,24 +83,55 @@ class TestPyprojectToml:
 
 class TestCargoToml:
     content = '[dependencies]\nserde = "1.0.152"\ntokio = { version = "1.28", features = ["full"] }\n'
+    nested_content = (
+        '[dependencies.regex]\n'
+        'version = "1.5.0"\n'
+        'features = ["unicode"]\n'
+    )
 
     def test_parse(self):
-        assert parse_cargo_toml(self.content) == {"serde": "1.0.152", "tokio": "1.28"}
+        assert parse_cargo_toml(self.content) == {"serde": "^1.0.152", "tokio": "^1.28"}
 
     def test_bump(self):
         assert 'serde = "1.0.229"' in bump_cargo_toml(self.content, "serde", "1.0.229")
 
+    def test_parse_nested_table_style(self):
+        deps = parse_cargo_toml(self.nested_content)
+        assert deps == {"regex": "^1.5.0"}
+
+    def test_bump_nested_table_preserves_other_keys(self):
+        bumped = bump_cargo_toml(self.nested_content, "regex", "1.6.0")
+        assert 'version = "1.6.0"' in bumped
+        assert 'features = ["unicode"]' in bumped
+
+    def test_bare_version_gets_implicit_caret_for_comparison(self):
+        # Cargo treats an unprefixed version as caret by default —
+        # confirms is_outdated treats it as a range, not an exact pin.
+        deps = parse_cargo_toml(self.content)
+        assert is_outdated(deps["serde"], "1.9.9") is False    # still ^1.x, not outdated
+        assert is_outdated(deps["serde"], "2.0.0") is True     # escapes major
+
+    def test_explicit_operator_is_left_alone(self):
+        content = '[dependencies]\nserde = "~1.0.152"\n'
+        assert parse_cargo_toml(content) == {"serde": "~1.0.152"}
+
 
 class TestGemfile:
-    content = 'gem "rails", "7.1.2"\ngem "pg", "~> 1.5"\ngem "puma"\n'
+    content = 'gem "rails", "7.1.2"\ngem "pg", "~> 1.5"\ngem "puma", ">= 5.0"\ngem "old", "<= 2.0.0"\ngem "x"\n'
 
     def test_parse(self):
         deps = parse_gemfile(self.content)
-        assert deps == {"rails": "7.1.2", "pg": "~> 1.5"}
-        assert "puma" not in deps  # unpinned, no constraint to compare
+        assert deps == {"rails": "7.1.2", "pg": "~=1.5", "puma": ">=5.0"}
+        assert "old" not in deps    # explicit ceiling, left alone on purpose
+        assert "x" not in deps      # unpinned, no constraint to compare
 
     def test_bump(self):
         assert 'gem "pg", "~> 1.6.0"' in bump_gemfile(self.content, "pg", "1.6.0")
+
+    def test_pessimistic_operator_is_range_aware(self):
+        deps = parse_gemfile(self.content)
+        assert is_outdated(deps["pg"], "1.9.0") is False   # ~> 1.5 allows up to <2.0
+        assert is_outdated(deps["pg"], "2.0.0") is True    # escapes the range
 
 
 class TestComposerJson:
@@ -138,6 +169,44 @@ class TestIsOutdated:
         assert is_outdated(">=2.0.0", "2.5.0") is True
         assert is_outdated("==2.5.0", "2.5.0") is False
         assert is_outdated("v1.2.3", "v1.3.0") is True
+
+
+class TestIgnoreMarker:
+    """`# mini-dep-bot: ignore` (or `//` for go.mod) on a dependency's
+    own line excludes it from parsing entirely — a lighter alternative
+    to .mini-dep-bot.yml's `ignore:` list.
+    """
+
+    def test_requirements_txt(self):
+        content = "requests==2.31.0  # mini-dep-bot: ignore\nflask>=3.0.0\n"
+        assert parse_requirements_txt(content) == {"flask": ">=3.0.0"}
+
+    def test_go_mod(self):
+        content = "module x\n\nrequire (\n\tgithub.com/a/b v1.0.0 // mini-dep-bot: ignore\n\tgithub.com/c/d v2.0.0\n)\n"
+        assert parse_go_mod(content) == {"github.com/c/d": "v2.0.0"}
+
+    def test_pyproject_toml_poetry_style(self):
+        content = '[tool.poetry.dependencies]\nrequests = "^2.31.0"  # mini-dep-bot: ignore\nflask = "^3.0.0"\n'
+        assert parse_pyproject_toml(content) == {"flask": "^3.0.0"}
+
+    def test_pyproject_toml_pep621_style(self):
+        content = (
+            '[project]\ndependencies = [\n'
+            '    "requests>=2.31.0",  # mini-dep-bot: ignore\n'
+            '    "flask>=3.0.0",\n]\n'
+        )
+        assert parse_pyproject_toml(content) == {"flask": ">=3.0.0"}
+
+    def test_cargo_toml_inline_and_nested(self):
+        content = (
+            '[dependencies]\nserde = "1.0.152"  # mini-dep-bot: ignore\ntokio = "1.28"\n\n'
+            '[dependencies.regex]\nversion = "1.5.0"  # mini-dep-bot: ignore\n'
+        )
+        assert parse_cargo_toml(content) == {"tokio": "^1.28"}
+
+    def test_gemfile(self):
+        content = 'gem "rails", "7.1.2"  # mini-dep-bot: ignore\ngem "pg", "~> 1.5"\n'
+        assert parse_gemfile(content) == {"pg": "~=1.5"}
 
 
 class TestBumpSeverity:

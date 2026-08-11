@@ -1,0 +1,33 @@
+name: mini-dep-bot cleanup
+
+# Deletes a mini-dep-bot branch once its PR is merged, so merged
+# branches don't pile up. This is a light complement to — not a
+# replacement for — the repo's own "Automatically delete head
+# branches" setting (Settings → General): that setting, if enabled,
+# already deletes every merged branch (including the bot's) with zero
+# extra workflow. This one exists for repos that don't want that
+# global setting on but still want mini-dep-bot's own branches cleaned
+# up specifically.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  delete-merged-branch:
+    if: |
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'mini-dep-bot/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete merged mini-dep-bot branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" \
+            || echo "Branch already gone (or couldn't be deleted) — nothing more to do."

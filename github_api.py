@@ -6,8 +6,7 @@ request, labeling it, and — optionally — enabling auto-merge on it.
 
 Deliberately hand-rolled with `requests` (rather than a wrapper library
 like PyGithub) so it's obvious this project talks to the GitHub API
-directly — that's the part that matters for the GitHub Developer
-Program's "integration ... using the GitHub API" requirement.
+directly.
 
 Docs: https://docs.github.com/en/rest, https://docs.github.com/en/graphql
 """
