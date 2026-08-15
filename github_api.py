@@ -118,6 +118,23 @@ class GitHubClient:
         )
         r.raise_for_status()
 
+    @_retry_transient
+    def list_tree(self, repo: str, branch: str) -> list:
+        """Every file path tracked by git at `branch`, at any depth
+        (one call, via the recursive Git Trees API). Only files git
+        actually tracks show up here — a gitignored `node_modules` or
+        `vendor` directory never appears, which is most of what keeps
+        it safe to scan a whole monorepo unscoped. If GitHub reports
+        the result as truncated (a very large repo), this just returns
+        whatever was included rather than failing the run.
+        """
+        r = self.session.get(
+            f"{API_ROOT}/repos/{repo}/git/trees/{branch}", params={"recursive": "1"}
+        )
+        r.raise_for_status()
+        data = r.json()
+        return [entry["path"] for entry in data.get("tree", []) if entry.get("type") == "blob"]
+
     @staticmethod
     def _pr_summary(data: dict) -> dict:
         """The subset of a PR API response the rest of the bot needs."""

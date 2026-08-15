@@ -36,11 +36,14 @@ jobs:
       # no checkout or toolchain, and a hand-edited lockfile risks a
       # stale integrity hash. This step covers that properly using the
       # real package manager: for every (branch, lockfile) bot.py just
-      # touched (.mini-dep-bot-updates.json), check that branch out,
-      # regenerate the lockfile for real, and push it back if it
-      # changed. ubuntu-latest ships Node/npm, Ruby/Bundler, Go,
-      # Rust/Cargo, PHP/Composer, and pipx out of the box; if your
-      # runner is missing one of these, add the matching
+      # touched (.mini-dep-bot-updates.json — lockfile paths can be
+      # nested, e.g. "apps/web/package-lock.json", for a monorepo),
+      # check that branch out, cd into the lockfile's own directory,
+      # regenerate it for real, and push it back if it changed.
+      # ubuntu-latest ships Node/npm, Ruby/Bundler, Go, Rust/Cargo,
+      # PHP/Composer, and pipx out of the box; `corepack enable` covers
+      # Yarn/pnpm without a separate setup step on Node 16.9+. If your
+      # runner is missing one of these anyway, add the matching
       # actions/setup-* step above this one.
       - name: Regenerate lockfiles
         if: ${{ !inputs.dry_run }}
@@ -52,25 +55,34 @@ jobs:
 
           git config user.name "mini-dep-bot"
           git config user.email "actions@github.com"
+          corepack enable 2>/dev/null || true
 
           jq -c '.[]' .mini-dep-bot-updates.json | while read -r entry; do
             branch=$(echo "$entry" | jq -r '.branch')
             lockfile=$(echo "$entry" | jq -r '.lockfile // empty')
             [ -z "$lockfile" ] && continue
 
+            lockfile_name=$(basename "$lockfile")
+            lockfile_dir=$(dirname "$lockfile")
+
             echo "::group::Regenerating $lockfile on $branch"
             git fetch origin "$branch"
             git checkout "$branch"
 
-            case "$lockfile" in
-              package-lock.json) npm install --package-lock-only ;;
-              poetry.lock)       pipx run poetry lock --no-update ;;
-              Cargo.lock)        cargo update --workspace ;;
-              Gemfile.lock)      bundle lock ;;
-              go.sum)            go mod tidy ;;
-              composer.lock)     composer update --lock --no-interaction ;;
-              *)                 echo "No regen command for $lockfile — skipping" ;;
-            esac
+            (
+              cd "$lockfile_dir"
+              case "$lockfile_name" in
+                package-lock.json) npm install --package-lock-only ;;
+                yarn.lock)         yarn install --mode update-lockfile ;;
+                pnpm-lock.yaml)    pnpm install --lockfile-only ;;
+                poetry.lock)       pipx run poetry lock --no-update ;;
+                Cargo.lock)        cargo update --workspace ;;
+                Gemfile.lock)      bundle lock ;;
+                go.sum)            go mod tidy ;;
+                composer.lock)     composer update --lock --no-interaction ;;
+                *)                 echo "No regen command for $lockfile_name — skipping" ;;
+              esac
+            )
 
             if ! git diff --quiet -- "$lockfile" 2>/dev/null; then
               git add "$lockfile"

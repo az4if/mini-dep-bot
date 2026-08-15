@@ -10,6 +10,110 @@ import bot
 from parsers import parse_package_json, bump_package_json
 
 
+class TestIsExcludedPath:
+    def test_builtin_noise_directories_are_excluded(self):
+        assert bot._is_excluded_path("node_modules/some-pkg/package.json", set()) is True
+        assert bot._is_excluded_path("apps/web/vendor/thing/composer.json", set()) is True
+        assert bot._is_excluded_path("backend/.venv/lib/x/pyproject.toml", set()) is True
+
+    def test_normal_nested_path_is_not_excluded(self):
+        assert bot._is_excluded_path("apps/web/package.json", set()) is False
+        assert bot._is_excluded_path("package.json", set()) is False
+
+    def test_config_exclude_paths_matches_prefix(self):
+        excludes = {"examples", "legacy-app"}
+        assert bot._is_excluded_path("examples/demo/package.json", excludes) is True
+        assert bot._is_excluded_path("legacy-app/Gemfile", excludes) is True
+        assert bot._is_excluded_path("apps/web/package.json", excludes) is False
+
+    def test_config_exclude_paths_matches_exact_file(self):
+        assert bot._is_excluded_path("tools/one-off/package.json", {"tools/one-off/package.json"}) is True
+
+
+class TestSiblingPath:
+    def test_nested_manifest(self):
+        assert bot._sibling_path("apps/web/package.json", "package-lock.json") == "apps/web/package-lock.json"
+
+    def test_root_manifest(self):
+        assert bot._sibling_path("package.json", "package-lock.json") == "package-lock.json"
+
+    def test_deeply_nested(self):
+        assert bot._sibling_path("a/b/c/Gemfile", "Gemfile.lock") == "a/b/c/Gemfile.lock"
+
+
+class TestDiscoverManifestPaths:
+    def test_finds_nested_manifests_across_the_repo(self):
+        client = MagicMock()
+        client.list_tree.return_value = [
+            "package.json",
+            "apps/web/package.json",
+            "apps/api/requirements.txt",
+            "README.md",
+        ]
+        config = {"exclude_paths": set()}
+        found = bot.discover_manifest_paths(client, "x/y", "main", config)
+
+        assert found["package.json"] == ["apps/web/package.json", "package.json"]
+        assert found["requirements.txt"] == ["apps/api/requirements.txt"]
+        assert found["go.mod"] == []
+
+    def test_excludes_noise_directories_by_default(self):
+        client = MagicMock()
+        client.list_tree.return_value = [
+            "package.json",
+            "node_modules/some-dep/package.json",
+            "vendor/some-lib/composer.json",
+        ]
+        config = {"exclude_paths": set()}
+        found = bot.discover_manifest_paths(client, "x/y", "main", config)
+
+        assert found["package.json"] == ["package.json"]
+        assert found["composer.json"] == []
+
+    def test_respects_config_exclude_paths(self):
+        client = MagicMock()
+        client.list_tree.return_value = ["package.json", "examples/demo/package.json"]
+        config = {"exclude_paths": {"examples"}}
+        found = bot.discover_manifest_paths(client, "x/y", "main", config)
+
+        assert found["package.json"] == ["package.json"]
+
+    def test_falls_back_to_root_only_when_tree_listing_fails(self):
+        client = MagicMock()
+        client.list_tree.side_effect = Exception("boom")
+        config = {"exclude_paths": set()}
+        found = bot.discover_manifest_paths(client, "x/y", "main", config)
+
+        assert found["package.json"] == ["package.json"]
+        assert found["Gemfile"] == ["Gemfile"]
+
+
+class TestFindLockfile:
+    def test_returns_first_matching_candidate(self):
+        client = MagicMock()
+        # package-lock.json missing, yarn.lock present
+        client.file_exists.side_effect = [False, True]
+        result = bot._find_lockfile(client, "x/y", "main", "package.json", "package.json")
+        assert result == ("yarn.lock", "yarn install --mode update-lockfile")
+
+    def test_checks_sibling_directory_for_nested_manifest(self):
+        client = MagicMock()
+        client.file_exists.return_value = True
+        result = bot._find_lockfile(client, "x/y", "main", "apps/web/package.json", "package.json")
+        assert result[0] == "apps/web/package-lock.json"
+        client.file_exists.assert_called_with("x/y", "apps/web/package-lock.json", "main")
+
+    def test_none_when_no_candidate_exists(self):
+        client = MagicMock()
+        client.file_exists.return_value = False
+        assert bot._find_lockfile(client, "x/y", "main", "package.json", "package.json") is None
+
+    def test_none_for_manifest_type_with_no_lockfile_mapping(self):
+        client = MagicMock()
+        assert bot._find_lockfile(client, "x/y", "main", "requirements.txt", "requirements.txt") is None
+        client.file_exists.assert_not_called()
+
+
 class TestFindUpdates:
     def test_ignore_and_pin_are_respected(self):
         deps = {"requests": "2.0.0", "flask": "1.0.0", "ignored-pkg": "1.0.0"}
@@ -181,6 +285,32 @@ class TestCheckManifest:
 
         assert url is None
 
+    def test_nested_monorepo_path_uses_manifest_type_for_ecosystem_lookups(self):
+        # path is nested (apps/web/...) but manifest_type is the plain
+        # basename — labels, lockfile candidates, and the branch name
+        # should all come out right for both.
+        client = self._client('{"dependencies": {"lodash": "4.17.0"}}', lockfile_exists=True)
+        client.open_pull_request.return_value = _pr(11, "PR_11")
+
+        with patch("bot.homepage_url", return_value=None), \
+             patch("bot.security.fixed_vulnerabilities", return_value=[]):
+            url = bot.check_manifest(
+                client, "x/y", "main", "apps/web/package.json", parse_package_json,
+                lambda name, max_major=None: "4.18.0", bump_package_json,
+                {"ignore": set(), "pin": {}, "automerge_patch": False},
+                manifest_type="package.json",
+            )
+
+        assert url == "https://github.com/x/y/pull/11"
+        # branch name is derived from the full nested path
+        branch_arg = client.create_branch.call_args.args[1]
+        assert branch_arg == "mini-dep-bot/apps/web/package-json/updates"
+        # label lookup used manifest_type, not the nested path
+        client.add_labels.assert_called_once_with("x/y", 11, ["dependencies", "npm"])
+        # lockfile note references the nested lockfile path
+        body = client.open_pull_request.call_args.kwargs["body"]
+        assert "apps/web/package-lock.json" in body
+
 
 def _get_file_side_effect(content_map):
     """A client.get_file side_effect that serves fixed content per
@@ -233,6 +363,34 @@ class TestRunCombined:
 
         labels = client.add_labels.call_args.args[2]
         assert set(labels) == {"dependencies", "npm", "python"}
+
+    def test_bundles_nested_monorepo_manifests_via_manifest_paths(self):
+        client = MagicMock()
+        client.get_file.side_effect = _get_file_side_effect({
+            "apps/web/package.json": '{"dependencies": {"lodash": "4.17.0"}}',
+            "apps/api/package.json": '{"dependencies": {"express": "4.17.0"}}',
+        })
+        client.find_open_pr.return_value = None
+        client.get_ref_sha.return_value = "ref-sha"
+        client.file_exists.return_value = False
+        client.open_pull_request.return_value = _pr(40, "PR_40")
+
+        test_manifests = [
+            ("package.json", parse_package_json, lambda name, max_major=None: "4.18.0", bump_package_json),
+        ]
+        manifest_paths = {"package.json": ["apps/api/package.json", "apps/web/package.json"]}
+
+        with patch.object(bot, "MANIFESTS", test_manifests), \
+             patch("bot.homepage_url", return_value=None), \
+             patch("bot.security.fixed_vulnerabilities", return_value=[]):
+            url = bot.run_combined(
+                client, "x/y", "main", self._config(), manifest_paths=manifest_paths,
+            )
+
+        assert url == "https://github.com/x/y/pull/40"
+        assert client.update_file.call_count == 2  # one commit per nested manifest
+        body = client.open_pull_request.call_args.kwargs["body"]
+        assert "`apps/api/package.json`" in body and "`apps/web/package.json`" in body
 
     def test_no_updates_anywhere_returns_none(self):
         client = MagicMock()

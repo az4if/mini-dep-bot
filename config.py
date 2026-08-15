@@ -18,9 +18,15 @@ Supported keys:
     combined_pr: true             # one PR for every manifest instead
                                    # of one PR per manifest
 
-All four keys are optional; a missing config file (or a repo with none
+    exclude_paths:                # directories/files never scanned
+      - examples/                 # for manifests, on top of the
+      - legacy-app/               # built-in node_modules/vendor/etc
+                                   # exclusions (see bot.py)
+
+All five keys are optional; a missing config file (or a repo with none
 at all) behaves exactly as before — nothing ignored, nothing pinned,
-auto-merge off, one PR per manifest.
+auto-merge off, one PR per manifest, every manifest in the repo scanned
+except the built-in noise-directory defaults.
 """
 
 import yaml
@@ -30,15 +36,24 @@ CONFIG_PATH = ".mini-dep-bot.yml"
 _AUTOMERGE_PATCH_VALUES = {"patch", "true", "yes", "1"}
 _TRUTHY_VALUES = {"true", "yes", "1"}
 
+_DEFAULT_CONFIG = {
+    "ignore": set(),
+    "pin": {},
+    "automerge_patch": False,
+    "combined_pr": False,
+    "exclude_paths": set(),
+}
+
 
 def load_config(client, repo: str, branch: str) -> dict:
     """Return {"ignore": set(...), "pin": {name: max_major, ...},
-    "automerge_patch": bool, "combined_pr": bool}.
+    "automerge_patch": bool, "combined_pr": bool,
+    "exclude_paths": set(...)}.
     """
     try:
         content, _ = client.get_file(repo, CONFIG_PATH, branch)
     except Exception:
-        return {"ignore": set(), "pin": {}, "automerge_patch": False, "combined_pr": False}
+        return dict(_DEFAULT_CONFIG)
 
     data = yaml.safe_load(content) or {}
 
@@ -60,9 +75,16 @@ def load_config(client, repo: str, branch: str) -> dict:
         or str(combined_raw).strip().lower() in _TRUTHY_VALUES
     )
 
+    exclude_paths = set()
+    for raw_path in (data.get("exclude_paths") or []):
+        cleaned = str(raw_path).strip().rstrip("/")
+        if cleaned:
+            exclude_paths.add(cleaned)
+
     return {
         "ignore": ignore,
         "pin": pin,
         "automerge_patch": automerge_patch,
         "combined_pr": combined_pr,
+        "exclude_paths": exclude_paths,
     }

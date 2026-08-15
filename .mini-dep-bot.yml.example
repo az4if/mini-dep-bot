@@ -1,8 +1,9 @@
 # Optional bot config. Copy this to `.mini-dep-bot.yml` at the root of
-# the target repo to customize what mini-dep-bot touches. All four
+# the target repo to customize what mini-dep-bot touches. All five
 # keys are optional — omit any (or the whole file) to use the
 # defaults (nothing ignored, nothing pinned, auto-merge off, one PR
-# per manifest).
+# per manifest, every manifest in the repo scanned except the
+# built-in noise-directory defaults).
 
 # Packages the bot should never open a PR for, no matter how outdated.
 # For a one-off exclusion you don't want in this file at all, a
@@ -30,3 +31,13 @@ automerge: patch
 # Contents API can only write one file per commit), but a single PR
 # either way. Omit or set false for the default (one PR per manifest).
 combined_pr: true
+
+# Directories or files never scanned for manifests, on top of the
+# built-in exclusions (node_modules, vendor, .venv, dist, build,
+# target, etc — see bot.py's EXCLUDED_DIR_NAMES). Matches by prefix,
+# so "examples" excludes everything under examples/ too. Only matters
+# for monorepos — a single root-level manifest is always scanned
+# regardless of this list.
+exclude_paths:
+  - examples/
+  - legacy-app/

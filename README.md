@@ -1,9 +1,10 @@
 # mini-dep-bot
 
 A small, self-built GitHub bot inspired by Renovate and Dependabot. It scans
-a repository's `package.json`, `requirements.txt`, `go.mod`, `pyproject.toml`,
-`Cargo.toml`, `Gemfile`, and `composer.json` for outdated dependencies —
-checking npm, PyPI, the Go module proxy, crates.io, RubyGems, and Packagist —
+every `package.json`, `requirements.txt`, `go.mod`, `pyproject.toml`,
+`Cargo.toml`, `Gemfile`, and `composer.json` anywhere in a repository — not
+just the root, so monorepos are covered too — for outdated dependencies,
+checking npm, PyPI, the Go module proxy, crates.io, RubyGems, and Packagist,
 and opens a pull request per manifest bundling every update it finds.
 
 ## Features
@@ -11,6 +12,9 @@ and opens a pull request per manifest bundling every update it finds.
 - Checks seven ecosystems: npm (`package.json`), Python (`requirements.txt`,
   Poetry-style and PEP 621 `pyproject.toml`), Go (`go.mod`), Rust
   (`Cargo.toml`), Ruby (`Gemfile`), and PHP (`composer.json`)
+- Scans the whole repo, not just the root — a monorepo with several
+  `package.json`/`requirements.txt` files gets all of them, automatically
+  (see [Monorepos](#monorepos) below)
 - Range-aware: a `^2.1.0` / `~=2.31` / etc. dependency is only flagged
   outdated once a release actually escapes that range, not on every new
   patch it already allows
@@ -23,7 +27,8 @@ and opens a pull request per manifest bundling every update it finds.
   [OSV.dev](https://osv.dev)), links each dependency's changelog/homepage
   when the registry exposes one, and — when run via the provided GitHub
   Actions workflow — regenerates any companion lockfile for real, using the
-  actual package manager (see [Lockfiles](#lockfiles) below)
+  actual package manager, whichever of npm/Yarn/pnpm's is actually present
+  for a JS manifest (see [Lockfiles](#lockfiles) below)
 - Optional auto-merge for a PR where every bundled bump is patch-level,
   gated behind `.mini-dep-bot.yml`
 - Optional combined mode: one PR for every manifest instead of one PR per
@@ -38,8 +43,8 @@ and opens a pull request per manifest bundling every update it finds.
   read-only API calls — no branch, commit, PR, label, or auto-merge setting
   gets created or changed
 - Optional `.mini-dep-bot.yml` config to ignore specific packages, pin one
-  to a max major version, opt into auto-merge, or combine every manifest
-  into one PR
+  to a max major version, opt into auto-merge, combine every manifest into
+  one PR, or exclude extra paths from being scanned
 - Runs on demand or on a schedule via GitHub Actions
 - No wrapper libraries — talks to the GitHub REST/GraphQL APIs directly
   with `requests`
@@ -195,6 +200,30 @@ Edit the `cron` line in `.github/workflows/dependency-check.yml`. It uses
 standard 5-field cron syntax in UTC, e.g. `0 6 * * 1` = every Monday at
 06:00 UTC, `0 0 * * *` = daily at midnight UTC.
 
+## Monorepos
+
+Manifest discovery isn't hardcoded to the repo root — before scanning,
+`bot.py` lists every file git tracks in the repo (one call, via the
+recursive Git Trees API) and finds every `package.json`,
+`requirements.txt`, etc at any depth. A repo with `apps/web/package.json`
+and `apps/api/requirements.txt` gets both, automatically, no config needed.
+Each nested manifest gets its own PR (or its own commit within a combined
+PR, if `combined_pr: true`) and its own branch, e.g.
+`mini-dep-bot/apps-web-package-json/updates`.
+
+A few defaults keep this safe:
+- `node_modules`, `vendor`, `.venv`/`venv`, `dist`, `build`, `target`, and a
+  few other common noise directories are never scanned, even if a repo
+  commits them. In practice this rarely matters — a properly gitignored
+  `node_modules` never shows up in the tracked-file listing in the first
+  place — but it's there as a backstop.
+- If listing the repo's files fails for any reason, discovery falls back
+  to root-only manifests — the same behavior as before monorepo support
+  existed, rather than failing the run.
+- Add your own exclusions with `.mini-dep-bot.yml`'s `exclude_paths` (see
+  [Configuration](#configuration)) — useful for a vendored/example
+  directory that isn't one of the built-in defaults.
+
 ## Lockfiles
 
 `bot.py` itself only ever edits a manifest file via the GitHub API — it
@@ -204,29 +233,40 @@ match what's declared. So instead, the provided workflow handles this
 properly in a follow-up step that has both:
 
 1. `bot.py` records which `(branch, lockfile)` pairs it actually changed
-   to `.mini-dep-bot-updates.json`.
+   to `.mini-dep-bot-updates.json` — `lockfile` is the full path next to
+   the manifest that changed (e.g. `apps/web/package-lock.json` for a
+   monorepo, not just `package-lock.json`).
 2. The workflow's **"Regenerate lockfiles"** step checks out each of those
-   branches and runs the real package manager — `npm install
-   --package-lock-only`, `cargo update`, `bundle lock`, `poetry lock
-   --no-update`, `go mod tidy`, or `composer update --lock` — then pushes
-   the regenerated lockfile back to the same branch if it changed. It ends
-   up as a second commit on the same PR the bot opened.
+   branches, `cd`s into the lockfile's own directory, and runs the real
+   package manager there — `npm install --package-lock-only`, `yarn
+   install --mode update-lockfile`, `pnpm install --lockfile-only`,
+   `cargo update`, `bundle lock`, `poetry lock --no-update`, `go mod
+   tidy`, or `composer update --lock` — then pushes the regenerated
+   lockfile back to the same branch if it changed. It ends up as a second
+   commit on the same PR the bot opened.
+
+For a JS manifest specifically, `bot.py` checks for `package-lock.json`,
+`yarn.lock`, and `pnpm-lock.yaml` in that order and uses whichever one is
+actually present next to the manifest — a Yarn or pnpm project gets the
+right lockfile touched, not an npm one by default.
 
 This relies on `ubuntu-latest` runners already having Node/npm,
 Ruby/Bundler, Go, Rust/Cargo, PHP/Composer, and `pipx` installed, which is
-true of the default GitHub-hosted runner image. If your runner is missing
-one of these, add the matching `actions/setup-*` step before "Regenerate
-lockfiles" in the workflow file.
+true of the default GitHub-hosted runner image; `corepack enable` (already
+in the workflow) covers Yarn/pnpm on Node 16.9+ without a separate setup
+step. If your runner is missing one of these anyway, add the matching
+`actions/setup-*` step before "Regenerate lockfiles" in the workflow file.
 
 This step only runs as part of the GitHub Actions workflow. Running
 `python bot.py` standalone updates the manifest but not the lockfile —
-regenerate it yourself with the command above for your ecosystem.
+regenerate it yourself with the command above for your ecosystem, from
+the manifest's own directory.
 
 ## Configuration
 
 Drop a `.mini-dep-bot.yml` at the root of the target repo to customize
 what the bot touches (see `.mini-dep-bot.yml.example` for a template).
-All four keys are optional:
+All five keys are optional:
 
 ```yaml
 ignore:
@@ -242,10 +282,15 @@ automerge: patch           # auto-merge a PR once checks pass, but
 
 combined_pr: true          # one PR for every manifest instead of one
                             # PR per manifest
+
+exclude_paths:              # directories/files never scanned for
+  - examples/                # manifests, on top of the built-in
+  - legacy-app/               # node_modules/vendor/etc exclusions
 ```
 
 No config file at all means the previous behavior: nothing ignored,
-nothing pinned, auto-merge off, one PR per manifest.
+nothing pinned, auto-merge off, one PR per manifest, every manifest in
+the repo scanned except the built-in noise-directory defaults.
 
 ## Ignoring a single dependency
 
@@ -317,9 +362,15 @@ This works for every format that has a comment syntax. `package.json` and
 - **Lockfiles aren't hand-edited** — see [Lockfiles](#lockfiles) above for
   how they get regenerated for real when run via the provided workflow,
   and what still requires a manual step outside of it.
+- Manifest discovery (see [Monorepos](#monorepos)) uses GitHub's recursive
+  Git Trees API, which caps out on extremely large repos (very high file
+  counts / response size) — a truncated listing just means some deeply
+  nested manifests may not get discovered, rather than the run failing.
 - The `automerge` config only ever asks GitHub to auto-merge — it never
   bypasses branch protection or required status checks, and does nothing
-  if the repo's "Allow auto-merge" setting is off.
+  if the repo's "Allow auto-merge" setting is off. If GitHub rejects the
+  request, that's currently silent — the run doesn't surface it as a
+  warning anywhere.
 - Go module proxy lookups need outbound access to `proxy.golang.org`;
   crates.io, RubyGems, Packagist, and OSV lookups likewise need access to
   `crates.io`, `rubygems.org`, `repo.packagist.org`, and `api.osv.dev`.

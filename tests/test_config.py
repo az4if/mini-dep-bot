@@ -13,12 +13,17 @@ def _client_with_file(content):
     return client
 
 
+_DEFAULTS = {
+    "ignore": set(), "pin": {}, "automerge_patch": False,
+    "combined_pr": False, "exclude_paths": set(),
+}
+
+
 class TestLoadConfig:
     def test_missing_file_returns_defaults(self):
         client = MagicMock()
         client.get_file.side_effect = Exception("404")
-        cfg = load_config(client, "x/y", "main")
-        assert cfg == {"ignore": set(), "pin": {}, "automerge_patch": False, "combined_pr": False}
+        assert load_config(client, "x/y", "main") == _DEFAULTS
 
     def test_ignore_and_pin(self):
         client = _client_with_file("ignore:\n  - noisy-pkg\npin:\n  some-pkg: 2\n")
@@ -43,6 +48,11 @@ class TestLoadConfig:
         client = _client_with_file("combined_pr: true\n")
         assert load_config(client, "x/y", "main")["combined_pr"] is True
 
+    def test_exclude_paths_strips_trailing_slash(self):
+        client = _client_with_file("exclude_paths:\n  - examples/\n  - legacy-app\n")
+        cfg = load_config(client, "x/y", "main")
+        assert cfg["exclude_paths"] == {"examples", "legacy-app"}
+
     def test_malformed_pin_entry_is_skipped_not_fatal(self):
         client = _client_with_file("pin:\n  some-pkg: not-a-number\n")
         cfg = load_config(client, "x/y", "main")
@@ -50,6 +60,4 @@ class TestLoadConfig:
 
     def test_empty_file(self):
         client = _client_with_file("")
-        assert load_config(client, "x/y", "main") == {
-            "ignore": set(), "pin": {}, "automerge_patch": False, "combined_pr": False,
-        }
+        assert load_config(client, "x/y", "main") == _DEFAULTS

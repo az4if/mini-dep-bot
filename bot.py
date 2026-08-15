@@ -7,7 +7,8 @@ A small GitHub bot that checks a repo's dependency manifests
 Gemfile, composer.json) against the latest versions published on npm,
 PyPI, the Go module proxy, crates.io, RubyGems, and Packagist, and
 opens a pull request per manifest bundling every outdated dependency
-it finds.
+it finds — at any depth in the repo, not just the root, so a monorepo
+with several `package.json`/`requirements.txt` files gets all of them.
 
 Each PR gets:
   - `dependencies` + an ecosystem label (npm/python/go/rust/ruby/php)
@@ -15,13 +16,16 @@ Each PR gets:
   - a changelog/homepage link per dependency, best-effort
   - a lockfile regenerated for real (via the provided GitHub Actions
     workflow's follow-up step — see LOCKFILES / WORKFLOW_UPDATES_FILE
-    below), or a manual heads-up when run standalone
+    below), or a manual heads-up when run standalone. For package.json
+    specifically, whichever of npm/Yarn/pnpm's lockfile is actually
+    present next to that manifest is the one that gets used.
   - auto-merge enabled, if `.mini-dep-bot.yml` opts in and every bump
     in the PR is patch-level
 
 Optional `.mini-dep-bot.yml` at the repo root can list packages to
-ignore entirely, pin specific packages to a max major version, or opt
-patch-only bumps into auto-merge — see config.py.
+ignore entirely, pin specific packages to a max major version, opt
+patch-only bumps into auto-merge, combine every manifest into one PR,
+or exclude extra paths from discovery — see config.py.
 
 Usage:
     export GITHUB_TOKEN=ghp_xxxxx     # repo scope, or Contents+PR read/write
@@ -67,7 +71,10 @@ load_dotenv()
 
 console = Console()
 
-# Each entry: (path in repo, parser, registry lookup, bump function)
+# Each entry: (basename to discover, parser, registry lookup, bump
+# function). The basename — not a fixed path — is what makes monorepo
+# support work: discover_manifest_paths() finds every file in the repo
+# matching one of these names, at any depth.
 MANIFESTS = [
     ("package.json", parse_package_json, latest_npm_version, bump_package_json),
     ("requirements.txt", parse_requirements_txt, latest_pypi_version, bump_requirements_txt),
@@ -78,8 +85,10 @@ MANIFESTS = [
     ("composer.json", parse_composer_json, latest_packagist_version, bump_composer_json),
 ]
 
-# A short ecosystem label per manifest, added to every PR alongside
-# "dependencies" so a repo with several ecosystems can filter by one.
+# A short ecosystem label per manifest type, added to every PR
+# alongside "dependencies" so a repo with several ecosystems can
+# filter by one. Keyed by basename ("package.json"), not full path —
+# an "apps/web/package.json" still gets the "npm" label.
 MANIFEST_LABELS = {
     "package.json": "npm",
     "requirements.txt": "python",
@@ -90,24 +99,33 @@ MANIFEST_LABELS = {
     "composer.json": "php",
 }
 
-# manifest path -> (companion lockfile name, command to regenerate it).
+# manifest type -> [(candidate lockfile name, command to regenerate
+# it), ...], checked in order and the first one that actually exists
+# wins. package.json has three real candidates since a JS project
+# could be on npm, Yarn, or pnpm — everything else has exactly one.
+#
 # mini-dep-bot itself only edits the manifest via the GitHub API — it
 # has no repo checkout or toolchain, and correctly resolving a lockfile
 # means running the real package manager (a naive hand-edit risks e.g.
 # a stale npm/yarn integrity hash). The provided GitHub Actions
 # workflow covers this properly instead: bot.py records which
 # (branch, lockfile) pairs changed, and a follow-up step in
-# dependency-check.yml checks out each branch, runs the real command
-# below, and pushes the regenerated lockfile to the same branch/PR —
-# see WORKFLOW_UPDATES_FILE below. Running bot.py standalone (outside
-# that workflow) skips this step, so the PR note still applies there.
+# dependency-check.yml checks out each branch, cds into that lockfile's
+# directory, runs the real command below, and pushes the regenerated
+# lockfile to the same branch/PR — see WORKFLOW_UPDATES_FILE below.
+# Running bot.py standalone (outside that workflow) skips this step,
+# so the PR note still applies there.
 LOCKFILES = {
-    "package.json": ("package-lock.json", "npm install --package-lock-only"),
-    "pyproject.toml": ("poetry.lock", "poetry lock --no-update"),
-    "Cargo.toml": ("Cargo.lock", "cargo update --workspace"),
-    "Gemfile": ("Gemfile.lock", "bundle lock"),
-    "go.mod": ("go.sum", "go mod tidy"),
-    "composer.json": ("composer.lock", "composer update --lock --no-interaction"),
+    "package.json": [
+        ("package-lock.json", "npm install --package-lock-only"),
+        ("yarn.lock", "yarn install --mode update-lockfile"),
+        ("pnpm-lock.yaml", "pnpm install --lockfile-only"),
+    ],
+    "pyproject.toml": [("poetry.lock", "poetry lock --no-update")],
+    "Cargo.toml": [("Cargo.lock", "cargo update --workspace")],
+    "Gemfile": [("Gemfile.lock", "bundle lock")],
+    "go.mod": [("go.sum", "go mod tidy")],
+    "composer.json": [("composer.lock", "composer update --lock --no-interaction")],
 }
 
 # Where main() writes the list of {"path", "branch", "lockfile"} dicts
@@ -118,6 +136,71 @@ LOCKFILES = {
 WORKFLOW_UPDATES_FILE = os.environ.get("MINI_DEP_BOT_UPDATES_FILE", ".mini-dep-bot-updates.json")
 
 BRANCH_PREFIX = "mini-dep-bot"
+
+# Directory names never scanned for manifests, even if a repo commits
+# them. Well-behaved repos won't have these in the git tree at all —
+# list_tree() only returns files git actually tracks, so a properly
+# gitignored node_modules never shows up in the first place — this is
+# a defensive backstop for the repos that don't. Extra project-specific
+# exclusions go in .mini-dep-bot.yml's `exclude_paths`.
+EXCLUDED_DIR_NAMES = {
+    "node_modules", "vendor", "bower_components",
+    ".venv", "venv", "env",
+    "dist", "build", "target",
+    ".git", ".tox", "__pycache__",
+}
+
+
+def _is_excluded_path(path: str, extra_excludes) -> bool:
+    """True if `path` sits inside a directory mini-dep-bot never
+    scans — a built-in noise directory, or one of the target repo's
+    own `.mini-dep-bot.yml` `exclude_paths` entries.
+    """
+    parts = path.split("/")
+    if any(part in EXCLUDED_DIR_NAMES for part in parts[:-1]):
+        return True
+    return any(
+        path == excluded or path.startswith(excluded + "/")
+        for excluded in extra_excludes
+    )
+
+
+def discover_manifest_paths(client, repo, branch, config):
+    """Find every tracked file in the repo matching one of MANIFESTS'
+    basenames, at any depth — this is what makes monorepos work
+    without hardcoding subdirectory paths. Returns
+    {basename: [full_path, ...]} (sorted, for stable output).
+
+    Falls back to root-only ({basename: [basename]}) if the tree
+    listing fails for any reason — same behavior as before monorepo
+    support existed, rather than failing the whole run.
+    """
+    basenames = {name for name, *_ in MANIFESTS}
+    try:
+        all_paths = client.list_tree(repo, branch)
+    except Exception:
+        return {name: [name] for name in basenames}
+
+    found = {name: [] for name in basenames}
+    for full_path in all_paths:
+        base = full_path.rsplit("/", 1)[-1]
+        if base in found and not _is_excluded_path(full_path, config["exclude_paths"]):
+            found[base].append(full_path)
+
+    for name in found:
+        found[name].sort()
+    return found
+
+
+def _sibling_path(manifest_path: str, filename: str) -> str:
+    """Join `filename` into the same directory as `manifest_path` —
+    e.g. ("apps/web/package.json", "package-lock.json") ->
+    "apps/web/package-lock.json". A root-level manifest (no "/")
+    just returns `filename` bare, unchanged.
+    """
+    if "/" in manifest_path:
+        return manifest_path.rsplit("/", 1)[0] + "/" + filename
+    return filename
 
 
 def find_updates(deps, lookup_fn, config):
@@ -137,18 +220,20 @@ def find_updates(deps, lookup_fn, config):
     return updates
 
 
-def _format_update_line(manifest_path, name, current, latest):
+def _format_update_line(manifest_type, name, current, latest):
     """One PR-body bullet for a single dependency bump, with a
     best-effort changelog link and vulnerability note. Both lookups
     are best-effort — a failure just omits that part of the line.
+    `manifest_type` is the manifest's basename (e.g. "package.json"),
+    used to pick the right registry/ecosystem — not its full path.
     """
     line = f"- **{name}**: `{current}` → `{latest}`"
 
-    link = homepage_url(manifest_path, name)
+    link = homepage_url(manifest_type, name)
     if link:
         line += f" — [{name}]({link})"
 
-    fixed = security.fixed_vulnerabilities(manifest_path, name, current, latest)
+    fixed = security.fixed_vulnerabilities(manifest_type, name, current, latest)
     if fixed:
         ids = ", ".join(fixed[:3]) + (", ..." if len(fixed) > 3 else "")
         line += f" 🔒 fixes {ids}"
@@ -156,26 +241,43 @@ def _format_update_line(manifest_path, name, current, latest):
     return line
 
 
-def _lockfile_note(client, repo, base_branch, manifest_path):
+def _find_lockfile(client, repo, base_branch, manifest_path, manifest_type):
+    """Return (lockfile_path, command) for whichever lockfile actually
+    exists next to `manifest_path`, checking each ecosystem-appropriate
+    candidate in order (e.g. package.json checks package-lock.json,
+    then yarn.lock, then pnpm-lock.yaml — whichever is really there is
+    the one used) — or None if none exist / the manifest type has no
+    known lockfile. Read-only — safe to call in dry-run.
+    """
+    candidates = LOCKFILES.get(manifest_type)
+    if not candidates:
+        return None
+    for name, command in candidates:
+        lockfile_path = _sibling_path(manifest_path, name)
+        try:
+            if client.file_exists(repo, lockfile_path, base_branch):
+                return lockfile_path, command
+        except Exception:
+            continue
+    return None
+
+
+def _lockfile_note(client, repo, base_branch, manifest_path, manifest_type):
     """Best-effort note about a companion lockfile, or "" if there
     isn't one / the check fails. Read-only — safe to call in dry-run.
     """
-    lockfile = LOCKFILES.get(manifest_path)
-    if not lockfile:
+    found = _find_lockfile(client, repo, base_branch, manifest_path, manifest_type)
+    if not found:
         return ""
-    name, command = lockfile
-    try:
-        exists = client.file_exists(repo, name, base_branch)
-    except Exception:
-        return ""
-    if not exists:
-        return ""
+    lockfile_path, command = found
+    lockfile_dir = lockfile_path.rsplit("/", 1)[0] if "/" in lockfile_path else None
+    run_from = f" (from the `{lockfile_dir}` directory)" if lockfile_dir else ""
     return (
-        f"\n\n⚠️ This repo also has `{name}`. If you're running the provided "
+        f"\n\n⚠️ This repo also has `{lockfile_path}`. If you're running the provided "
         f"GitHub Actions workflow, its \"Regenerate lockfiles\" step pushes an "
-        f"updated `{name}` to this branch automatically. Running `bot.py` "
+        f"updated `{lockfile_path}` to this branch automatically. Running `bot.py` "
         f"standalone, or if that step is disabled: regenerate it yourself "
-        f"(e.g. `{command}`) and push it to this branch before merging."
+        f"(e.g. `{command}`{run_from}) and push it to this branch before merging."
     )
 
 
@@ -224,10 +326,17 @@ def _write_step_summary(repo, base_branch, dry_run, config, all_prs):
 
 
 def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn, config,
-                    dry_run=False, updates_log=None):
+                    manifest_type=None, dry_run=False, updates_log=None):
     """Bundle every outdated dependency in this manifest into a single
     branch and PR. If a PR for this manifest is already open, push an
     updated commit to it instead of opening a duplicate.
+
+    `path` is the manifest's actual location in the repo (e.g.
+    "apps/web/package.json" for a monorepo) — used for every GitHub
+    API call and the branch name. `manifest_type` is its basename
+    (e.g. "package.json"), used for ecosystem-keyed lookups (labels,
+    OSV, lockfile candidates); it defaults to `path` when omitted, for
+    the common case of a root-level manifest where they're the same.
 
     In dry-run mode, only read-only GitHub/registry/OSV calls are made
     — no branch, commit, PR, label, or auto-merge setting is created —
@@ -241,6 +350,8 @@ def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn
     Returns the PR url (or dry-run summary) if there's anything to
     report, else None.
     """
+    manifest_type = manifest_type or path
+
     try:
         content, _ = client.get_file(repo, path, base_branch)
     except Exception:
@@ -287,19 +398,19 @@ def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn
         return existing_pr["html_url"] if existing_pr else None
 
     summary = "\n".join(
-        _format_update_line(path, name, current, latest) for name, current, latest in updates
+        _format_update_line(manifest_type, name, current, latest) for name, current, latest in updates
     )
     body = f"Automated dependency updates for `{path}`.\n\n{summary}\n\n_Opened by mini-dep-bot._"
-    body += _lockfile_note(client, repo, base_branch, path)
+    body += _lockfile_note(client, repo, base_branch, path, manifest_type)
 
     client.update_file(repo, path, branch, updated, fresh_sha, message=message)
 
     if updates_log is not None:
-        lockfile = LOCKFILES.get(path)
+        found = _find_lockfile(client, repo, base_branch, path, manifest_type)
         updates_log.append({
             "path": path,
             "branch": branch,
-            "lockfile": lockfile[0] if lockfile else None,
+            "lockfile": found[0] if found else None,
         })
 
     if existing_pr:
@@ -308,7 +419,7 @@ def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn
         pr = client.open_pull_request(repo, branch, base_branch, title=message, body=body)
 
     try:
-        client.add_labels(repo, pr["number"], ["dependencies", MANIFEST_LABELS[path]])
+        client.add_labels(repo, pr["number"], ["dependencies", MANIFEST_LABELS[manifest_type]])
     except Exception:
         pass  # labeling is a nice-to-have — never let it fail the run
 
@@ -321,10 +432,15 @@ def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn
 COMBINED_BRANCH = f"{BRANCH_PREFIX}/all-updates"
 
 
-def run_combined(client, repo, base_branch, config, dry_run=False, updates_log=None):
+def run_combined(client, repo, base_branch, config, manifest_paths=None, dry_run=False, updates_log=None):
     """Like check_manifest, but bundles every outdated dependency
-    across every manifest into a single branch/PR instead of one PR
-    per manifest. Opt in via `.mini-dep-bot.yml`'s `combined_pr: true`.
+    across every manifest — including nested ones in a monorepo —
+    into a single branch/PR instead of one PR per manifest. Opt in via
+    `.mini-dep-bot.yml`'s `combined_pr: true`.
+
+    `manifest_paths` is a {basename: [full_path, ...]} dict from
+    discover_manifest_paths(); defaults to the root-only case
+    ({basename: [basename]}) when omitted.
 
     Each manifest that changes is still its own commit on that shared
     branch — the GitHub Contents API can only write one file per
@@ -335,39 +451,43 @@ def run_combined(client, repo, base_branch, config, dry_run=False, updates_log=N
     the PR url (or dry-run summary) if there's anything to report,
     else None.
     """
-    per_manifest = []  # (path, bump_fn, updates, severities)
-    for path, parse_fn, lookup_fn, bump_fn in MANIFESTS:
-        console.print(f"  [dim]scanning[/dim] {path}...")
-        try:
-            content, _ = client.get_file(repo, path, base_branch)
-        except Exception:
-            continue  # manifest not present in this repo
-        deps = parse_fn(content)
-        updates = find_updates(deps, lookup_fn, config)
-        if not updates:
-            continue
-        severities = [bump_severity(current, latest) for _, current, latest in updates]
-        per_manifest.append((path, bump_fn, updates, severities))
+    if manifest_paths is None:
+        manifest_paths = {name: [name] for name, *_ in MANIFESTS}
 
-    if not per_manifest:
+    per_file = []  # (path, manifest_type, bump_fn, updates, severities)
+    for manifest_type, parse_fn, lookup_fn, bump_fn in MANIFESTS:
+        for path in manifest_paths.get(manifest_type, []):
+            console.print(f"  [dim]scanning[/dim] {path}...")
+            try:
+                content, _ = client.get_file(repo, path, base_branch)
+            except Exception:
+                continue  # manifest not present in this repo
+            deps = parse_fn(content)
+            updates = find_updates(deps, lookup_fn, config)
+            if not updates:
+                continue
+            severities = [bump_severity(current, latest) for _, current, latest in updates]
+            per_file.append((path, manifest_type, bump_fn, updates, severities))
+
+    if not per_file:
         return None
 
     branch = COMBINED_BRANCH
-    all_severities = [s for *_, severities in per_manifest for s in severities]
+    all_severities = [s for *_, severities in per_file for s in severities]
     automerge_eligible = config["automerge_patch"] and all(s == "patch" for s in all_severities)
 
     if dry_run:
         existing_pr = client.find_open_pr(repo, branch, base_branch)  # read-only
         action = f"push new commits to the open PR ({existing_pr['html_url']})" if existing_pr \
             else "open a new combined PR"
-        console.print(f"    [yellow]would {action}[/yellow] across {len(per_manifest)} manifest(s):")
-        for path, _, updates, severities in per_manifest:
+        console.print(f"    [yellow]would {action}[/yellow] across {len(per_file)} manifest(s):")
+        for path, _, _, updates, severities in per_file:
             for (name, current, latest), severity in zip(updates, severities):
                 console.print(f"      - [{path}] {name}: {current} -> {latest}  [{severity}]")
         if automerge_eligible:
             console.print("      [dim]would enable auto-merge (all patch-level, automerge: patch)[/dim]")
         return (existing_pr["html_url"] if existing_pr
-                else f"[dry-run] combined: {len(per_manifest)} manifest(s) with updates, would open a new PR")
+                else f"[dry-run] combined: {len(per_file)} manifest(s) with updates, would open a new PR")
 
     existing_pr = client.find_open_pr(repo, branch, base_branch)
     client.create_branch(repo, branch, client.get_ref_sha(repo, base_branch))
@@ -375,7 +495,7 @@ def run_combined(client, repo, base_branch, config, dry_run=False, updates_log=N
     body_sections = []
     any_pushed = False
 
-    for path, bump_fn, updates, _severities in per_manifest:
+    for path, manifest_type, bump_fn, updates, _severities in per_file:
         fresh_content, fresh_sha = client.get_file(repo, path, branch)
         updated = fresh_content
         for name, current, latest in updates:
@@ -389,17 +509,17 @@ def run_combined(client, repo, base_branch, config, dry_run=False, updates_log=N
         any_pushed = True
 
         if updates_log is not None:
-            lockfile = LOCKFILES.get(path)
+            found = _find_lockfile(client, repo, base_branch, path, manifest_type)
             updates_log.append({
                 "path": path, "branch": branch,
-                "lockfile": lockfile[0] if lockfile else None,
+                "lockfile": found[0] if found else None,
             })
 
         summary = "\n".join(
-            _format_update_line(path, name, current, latest) for name, current, latest in updates
+            _format_update_line(manifest_type, name, current, latest) for name, current, latest in updates
         )
         section = f"### `{path}`\n\n{summary}"
-        section += _lockfile_note(client, repo, base_branch, path)
+        section += _lockfile_note(client, repo, base_branch, path, manifest_type)
         body_sections.append(section)
 
     if not any_pushed:
@@ -410,10 +530,10 @@ def run_combined(client, repo, base_branch, config, dry_run=False, updates_log=N
     if existing_pr:
         pr = existing_pr  # new commit(s) were just pushed to the open PR
     else:
-        title = f"chore(deps): update {len(per_manifest)} manifest(s)"
+        title = f"chore(deps): update {len(per_file)} manifest(s)"
         pr = client.open_pull_request(repo, branch, base_branch, title=title, body=body)
 
-    labels = sorted({"dependencies"} | {MANIFEST_LABELS[path] for path, *_ in per_manifest})
+    labels = sorted({"dependencies"} | {MANIFEST_LABELS[manifest_type] for _, manifest_type, *_ in per_file})
     try:
         client.add_labels(repo, pr["number"], labels)
     except Exception:
@@ -454,30 +574,39 @@ def main():
     console.print(f"[bold]mini-dep-bot[/bold] checking [cyan]{repo}[/cyan]@{base_branch}")
     if dry_run:
         console.print("[bold yellow]DRY RUN[/bold yellow] — no branches, commits, or PRs will be created")
-    if config["ignore"] or config["pin"] or config["automerge_patch"] or config["combined_pr"]:
+    if config["ignore"] or config["pin"] or config["automerge_patch"] or config["combined_pr"] or config["exclude_paths"]:
         console.print(
             f"  [dim]config:[/dim] ignoring {sorted(config['ignore']) or 'none'}, "
             f"pinning {config['pin'] or 'none'}, "
             f"automerge {'patch-only' if config['automerge_patch'] else 'off'}, "
-            f"mode {'combined' if config['combined_pr'] else 'per-manifest'}"
+            f"mode {'combined' if config['combined_pr'] else 'per-manifest'}, "
+            f"excluding {sorted(config['exclude_paths']) or 'none'}"
         )
+
+    manifest_paths = discover_manifest_paths(client, repo, base_branch, config)
+    discovered_count = sum(len(paths) for paths in manifest_paths.values())
+    console.print(f"  [dim]discovered[/dim] {discovered_count} manifest file(s) across the repo")
 
     all_prs = []
     updates_log = []
     if config["combined_pr"]:
         console.print("  [dim]mode:[/dim] combined PR across all manifests")
-        pr_url = run_combined(client, repo, base_branch, config, dry_run=dry_run, updates_log=updates_log)
+        pr_url = run_combined(
+            client, repo, base_branch, config, manifest_paths=manifest_paths,
+            dry_run=dry_run, updates_log=updates_log,
+        )
         if pr_url:
             all_prs.append(pr_url)
     else:
-        for path, parse_fn, lookup_fn, bump_fn in MANIFESTS:
-            console.print(f"  [dim]scanning[/dim] {path}...")
-            pr_url = check_manifest(
-                client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn, config,
-                dry_run=dry_run, updates_log=updates_log,
-            )
-            if pr_url:
-                all_prs.append(pr_url)
+        for manifest_type, parse_fn, lookup_fn, bump_fn in MANIFESTS:
+            for path in manifest_paths.get(manifest_type, []):
+                console.print(f"  [dim]scanning[/dim] {path}...")
+                pr_url = check_manifest(
+                    client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn, config,
+                    manifest_type=manifest_type, dry_run=dry_run, updates_log=updates_log,
+                )
+                if pr_url:
+                    all_prs.append(pr_url)
 
     if updates_log and not dry_run:
         try:
