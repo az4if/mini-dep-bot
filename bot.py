@@ -281,7 +281,7 @@ def _lockfile_note(client, repo, base_branch, manifest_path, manifest_type):
     )
 
 
-def _write_step_summary(repo, base_branch, dry_run, config, all_prs):
+def _write_step_summary(repo, base_branch, dry_run, config, all_prs, automerge_failures=None):
     """Best-effort: append a readable summary to GitHub Actions' job
     summary UI (the $GITHUB_STEP_SUMMARY file), so the run's outcome
     is visible without opening the console logs. Writes nothing when
@@ -295,6 +295,14 @@ def _write_step_summary(repo, base_branch, dry_run, config, all_prs):
     if dry_run:
         lines.append("**Dry run** — no branches, commits, or PRs were created.")
         lines.append("")
+
+    if config["warnings"]:
+        lines.append(f"### ⚠️ {len(config['warnings'])} config warning(s) in `.mini-dep-bot.yml`")
+        lines.append("")
+        for warning in config["warnings"]:
+            lines.append(f"- {warning}")
+        lines.append("")
+
     if config["ignore"] or config["pin"] or config["automerge_patch"] or config["combined_pr"]:
         lines.append("**Config:**")
         if config["ignore"]:
@@ -318,6 +326,18 @@ def _write_step_summary(repo, base_branch, dry_run, config, all_prs):
         lines.append("### Everything is up to date")
         lines.append("No outdated dependencies found (or no supported manifest was present).")
 
+    if automerge_failures:
+        lines.append("")
+        lines.append(f"### ⚠️ Auto-merge rejected for {len(automerge_failures)} PR(s)")
+        lines.append("")
+        lines.append(
+            "GitHub didn't accept the auto-merge request — check the repo's "
+            "\"Allow auto-merge\" setting and branch protection rules."
+        )
+        lines.append("")
+        for failure in automerge_failures:
+            lines.append(f"- `{failure['path']}` — {failure['pr_url']}")
+
     try:
         with open(summary_path, "a") as f:
             f.write("\n".join(lines) + "\n")
@@ -326,7 +346,7 @@ def _write_step_summary(repo, base_branch, dry_run, config, all_prs):
 
 
 def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn, config,
-                    manifest_type=None, dry_run=False, updates_log=None):
+                    manifest_type=None, dry_run=False, updates_log=None, automerge_failures=None):
     """Bundle every outdated dependency in this manifest into a single
     branch and PR. If a PR for this manifest is already open, push an
     updated commit to it instead of opening a duplicate.
@@ -337,6 +357,12 @@ def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn
     (e.g. "package.json"), used for ecosystem-keyed lookups (labels,
     OSV, lockfile candidates); it defaults to `path` when omitted, for
     the common case of a root-level manifest where they're the same.
+
+    When `automerge_failures` is given, a {"path", "pr_url"} dict is
+    appended to it if GitHub rejects an eligible auto-merge request
+    (branch protection not configured, "Allow auto-merge" off, etc) —
+    see _write_step_summary, which surfaces these instead of letting
+    a rejected request pass by silently.
 
     In dry-run mode, only read-only GitHub/registry/OSV calls are made
     — no branch, commit, PR, label, or auto-merge setting is created —
@@ -424,7 +450,14 @@ def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn
         pass  # labeling is a nice-to-have — never let it fail the run
 
     if automerge_eligible:
-        client.enable_auto_merge(pr["node_id"])
+        if not client.enable_auto_merge(pr["node_id"]):
+            console.print(
+                f"    [yellow]⚠ auto-merge was requested but GitHub rejected it[/yellow] "
+                f"for {path} ({pr['html_url']}) — check the repo's \"Allow auto-merge\" "
+                f"setting and branch protection rules"
+            )
+            if automerge_failures is not None:
+                automerge_failures.append({"path": path, "pr_url": pr["html_url"]})
 
     return pr["html_url"]
 
@@ -432,7 +465,8 @@ def check_manifest(client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn
 COMBINED_BRANCH = f"{BRANCH_PREFIX}/all-updates"
 
 
-def run_combined(client, repo, base_branch, config, manifest_paths=None, dry_run=False, updates_log=None):
+def run_combined(client, repo, base_branch, config, manifest_paths=None, dry_run=False,
+                  updates_log=None, automerge_failures=None):
     """Like check_manifest, but bundles every outdated dependency
     across every manifest — including nested ones in a monorepo —
     into a single branch/PR instead of one PR per manifest. Opt in via
@@ -447,9 +481,9 @@ def run_combined(client, repo, base_branch, config, manifest_paths=None, dry_run
     commit — so the PR ends up with one commit per touched manifest
     rather than a single multi-file commit, but it's one PR either way.
 
-    Same dry-run and updates_log contract as check_manifest. Returns
-    the PR url (or dry-run summary) if there's anything to report,
-    else None.
+    Same dry-run, updates_log, and automerge_failures contract as
+    check_manifest. Returns the PR url (or dry-run summary) if there's
+    anything to report, else None.
     """
     if manifest_paths is None:
         manifest_paths = {name: [name] for name, *_ in MANIFESTS}
@@ -540,7 +574,14 @@ def run_combined(client, repo, base_branch, config, manifest_paths=None, dry_run
         pass  # labeling is a nice-to-have — never let it fail the run
 
     if automerge_eligible:
-        client.enable_auto_merge(pr["node_id"])
+        if not client.enable_auto_merge(pr["node_id"]):
+            console.print(
+                f"    [yellow]⚠ auto-merge was requested but GitHub rejected it[/yellow] "
+                f"for the combined PR ({pr['html_url']}) — check the repo's "
+                f"\"Allow auto-merge\" setting and branch protection rules"
+            )
+            if automerge_failures is not None:
+                automerge_failures.append({"path": "combined", "pr_url": pr["html_url"]})
 
     return pr["html_url"]
 
@@ -574,6 +615,10 @@ def main():
     console.print(f"[bold]mini-dep-bot[/bold] checking [cyan]{repo}[/cyan]@{base_branch}")
     if dry_run:
         console.print("[bold yellow]DRY RUN[/bold yellow] — no branches, commits, or PRs will be created")
+    if config["warnings"]:
+        console.print(f"[bold yellow]⚠ {len(config['warnings'])} problem(s) in .mini-dep-bot.yml:[/bold yellow]")
+        for warning in config["warnings"]:
+            console.print(f"  [yellow]- {warning}[/yellow]")
     if config["ignore"] or config["pin"] or config["automerge_patch"] or config["combined_pr"] or config["exclude_paths"]:
         console.print(
             f"  [dim]config:[/dim] ignoring {sorted(config['ignore']) or 'none'}, "
@@ -589,11 +634,12 @@ def main():
 
     all_prs = []
     updates_log = []
+    automerge_failures = []
     if config["combined_pr"]:
         console.print("  [dim]mode:[/dim] combined PR across all manifests")
         pr_url = run_combined(
             client, repo, base_branch, config, manifest_paths=manifest_paths,
-            dry_run=dry_run, updates_log=updates_log,
+            dry_run=dry_run, updates_log=updates_log, automerge_failures=automerge_failures,
         )
         if pr_url:
             all_prs.append(pr_url)
@@ -604,6 +650,7 @@ def main():
                 pr_url = check_manifest(
                     client, repo, base_branch, path, parse_fn, lookup_fn, bump_fn, config,
                     manifest_type=manifest_type, dry_run=dry_run, updates_log=updates_log,
+                    automerge_failures=automerge_failures,
                 )
                 if pr_url:
                     all_prs.append(pr_url)
@@ -626,7 +673,7 @@ def main():
             "(or no supported manifest files were found)."
         )
 
-    _write_step_summary(repo, base_branch, dry_run, config, all_prs)
+    _write_step_summary(repo, base_branch, dry_run, config, all_prs, automerge_failures)
 
 
 if __name__ == "__main__":

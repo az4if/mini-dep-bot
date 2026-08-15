@@ -198,6 +198,40 @@ class TestCheckManifest:
 
         client.enable_auto_merge.assert_called_once_with("PR_2")
 
+    def test_automerge_rejection_is_recorded_in_automerge_failures(self):
+        client = self._client('{"dependencies": {"lodash": "4.17.0"}}')
+        client.open_pull_request.return_value = _pr(3, "PR_3")
+        client.enable_auto_merge.return_value = False  # GitHub rejects it
+        automerge_failures = []
+
+        with patch("bot.homepage_url", return_value=None), \
+             patch("bot.security.fixed_vulnerabilities", return_value=[]):
+            bot.check_manifest(
+                client, "x/y", "main", "package.json", parse_package_json,
+                lambda name, max_major=None: "4.17.9", bump_package_json,  # patch bump
+                {"ignore": set(), "pin": {}, "automerge_patch": True},
+                automerge_failures=automerge_failures,
+            )
+
+        assert automerge_failures == [{"path": "package.json", "pr_url": "https://github.com/x/y/pull/3"}]
+
+    def test_automerge_success_records_nothing(self):
+        client = self._client('{"dependencies": {"lodash": "4.17.0"}}')
+        client.open_pull_request.return_value = _pr(4, "PR_4")
+        client.enable_auto_merge.return_value = True  # accepted
+        automerge_failures = []
+
+        with patch("bot.homepage_url", return_value=None), \
+             patch("bot.security.fixed_vulnerabilities", return_value=[]):
+            bot.check_manifest(
+                client, "x/y", "main", "package.json", parse_package_json,
+                lambda name, max_major=None: "4.17.9", bump_package_json,
+                {"ignore": set(), "pin": {}, "automerge_patch": True},
+                automerge_failures=automerge_failures,
+            )
+
+        assert automerge_failures == []
+
     def test_minor_bump_does_not_trigger_automerge(self):
         client = self._client('{"dependencies": {"lodash": "4.17.0"}}')
         client.open_pull_request.return_value = _pr(3, "PR_3")
@@ -473,14 +507,16 @@ class TestRunCombined:
 
 
 class TestWriteStepSummary:
+    def _config(self, **overrides):
+        return {
+            "ignore": set(), "pin": {}, "automerge_patch": False,
+            "combined_pr": False, "warnings": [], **overrides,
+        }
+
     def test_writes_nothing_outside_github_actions(self, tmp_path, monkeypatch):
         monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
         # Should simply return without raising, and without needing a real file.
-        bot._write_step_summary(
-            "x/y", "main", False,
-            {"ignore": set(), "pin": {}, "automerge_patch": False, "combined_pr": False},
-            [],
-        )
+        bot._write_step_summary("x/y", "main", False, self._config(), [])
 
     def test_writes_summary_when_env_var_set(self, tmp_path, monkeypatch):
         summary_file = tmp_path / "summary.md"
@@ -488,7 +524,7 @@ class TestWriteStepSummary:
 
         bot._write_step_summary(
             "x/y", "main", False,
-            {"ignore": {"noisy-pkg"}, "pin": {"some-pkg": 2}, "automerge_patch": True, "combined_pr": False},
+            self._config(ignore={"noisy-pkg"}, pin={"some-pkg": 2}, automerge_patch=True),
             ["https://github.com/x/y/pull/1", "https://github.com/x/y/pull/2"],
         )
 
@@ -504,10 +540,43 @@ class TestWriteStepSummary:
         summary_file = tmp_path / "summary.md"
         monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
 
+        bot._write_step_summary("x/y", "main", False, self._config(), [])
+
+        assert "up to date" in summary_file.read_text()
+
+    def test_config_warnings_are_surfaced(self, tmp_path, monkeypatch):
+        summary_file = tmp_path / "summary.md"
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+
         bot._write_step_summary(
             "x/y", "main", False,
-            {"ignore": set(), "pin": {}, "automerge_patch": False, "combined_pr": False},
+            self._config(warnings=["pin: 'foo: bar' isn't a valid major version — skipped"]),
             [],
         )
 
-        assert "up to date" in summary_file.read_text()
+        content = summary_file.read_text()
+        assert "1 config warning" in content
+        assert "pin: 'foo: bar'" in content
+
+    def test_automerge_failures_are_surfaced(self, tmp_path, monkeypatch):
+        summary_file = tmp_path / "summary.md"
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+
+        bot._write_step_summary(
+            "x/y", "main", False, self._config(),
+            ["https://github.com/x/y/pull/9"],
+            automerge_failures=[{"path": "package.json", "pr_url": "https://github.com/x/y/pull/9"}],
+        )
+
+        content = summary_file.read_text()
+        assert "Auto-merge rejected for 1 PR" in content
+        assert "package.json" in content
+        assert "https://github.com/x/y/pull/9" in content
+
+    def test_no_automerge_failures_section_when_none_given(self, tmp_path, monkeypatch):
+        summary_file = tmp_path / "summary.md"
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+
+        bot._write_step_summary("x/y", "main", False, self._config(), [])
+
+        assert "rejected" not in summary_file.read_text()

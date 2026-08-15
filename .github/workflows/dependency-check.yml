@@ -14,6 +14,17 @@ permissions:
   contents: write
   pull-requests: write
 
+# Only one run of this workflow at a time. This bot pushes real
+# commits and opens real PRs, so a manual dry-run kicked off while the
+# scheduled run is still going could race on the same branches — queue
+# the newer run instead of letting them overlap. cancel-in-progress
+# stays false on purpose: cancelling mid-run could leave a branch
+# created but its PR not yet opened, or a commit pushed but its labels
+# not yet applied.
+concurrency:
+  group: mini-dep-bot-dependency-check
+  cancel-in-progress: false
+
 jobs:
   check-dependencies:
     runs-on: ubuntu-latest

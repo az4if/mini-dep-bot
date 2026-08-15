@@ -16,6 +16,13 @@ on:
 permissions:
   contents: write
 
+# Scoped per-PR so cleanup for different merged PRs still runs in
+# parallel — this only serializes the (rare) case of the same PR
+# triggering this workflow twice in quick succession.
+concurrency:
+  group: mini-dep-bot-cleanup-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 jobs:
   delete-merged-branch:
     if: |

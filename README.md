@@ -180,15 +180,19 @@ same automatic token — nothing extra to set up for it either.
   **Run workflow**. This button exists because of `workflow_dispatch` in
   the workflow file — it has a **Dry run** checkbox if you want to preview
   changes without opening any PRs.
+- Triggering a manual run while the scheduled one is still going doesn't
+  race — `dependency-check.yml`'s `concurrency:` block queues the newer
+  run instead of letting both touch the same branches at once.
 
 ### 5. Check the results
 
 - **Pull requests** tab — any dependency bumps the bot opened, labeled by
   ecosystem
 - **Actions** tab → the run → its **Summary** — a readable breakdown of
-  what was checked, the active config, and the PRs opened/updated
-  ($GITHUB_STEP_SUMMARY), in addition to the full console logs on the
-  same page
+  what was checked, the active config (plus any `.mini-dep-bot.yml`
+  warnings or rejected auto-merge requests, if either happened), and the
+  PRs opened/updated ($GITHUB_STEP_SUMMARY), in addition to the full
+  console logs on the same page
 - Once a bot PR merges, **cleanup-merged-branches.yml** deletes its branch
   automatically (skip this by turning off/deleting that workflow file — it's
   redundant if the repo already has **Settings → General → Automatically
@@ -292,6 +296,12 @@ No config file at all means the previous behavior: nothing ignored,
 nothing pinned, auto-merge off, one PR per manifest, every manifest in
 the repo scanned except the built-in noise-directory defaults.
 
+A malformed entry — wrong type, or a value like `pin: {some-pkg: two}`
+that isn't parseable — doesn't crash the run, but it also doesn't fail
+silently: it's skipped and reported both in the console output and the
+GitHub Actions step summary, so a typo in this file is never
+indistinguishable from "nothing configured".
+
 ## Ignoring a single dependency
 
 For a one-off "don't touch this" that doesn't need a `.mini-dep-bot.yml`
@@ -369,8 +379,10 @@ This works for every format that has a comment syntax. `package.json` and
 - The `automerge` config only ever asks GitHub to auto-merge — it never
   bypasses branch protection or required status checks, and does nothing
   if the repo's "Allow auto-merge" setting is off. If GitHub rejects the
-  request, that's currently silent — the run doesn't surface it as a
-  warning anywhere.
+  request, that's surfaced as a console warning and a section in the
+  GitHub Actions step summary — it isn't retried, since the usual causes
+  (branch protection not configured, the repo setting being off) aren't
+  transient.
 - Go module proxy lookups need outbound access to `proxy.golang.org`;
   crates.io, RubyGems, Packagist, and OSV lookups likewise need access to
   `crates.io`, `rubygems.org`, `repo.packagist.org`, and `api.osv.dev`.
