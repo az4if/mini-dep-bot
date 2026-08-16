@@ -14,11 +14,6 @@ just the root, so monorepos are covered too — for outdated dependencies,
 checking npm, PyPI, the Go module proxy, crates.io, RubyGems, and Packagist,
 and opens a pull request per manifest bundling every update it finds.
 
-> [!NOTE]
-> The **Tests** badge above points at `your-username/your-repo` — swap that
-> for wherever you push this project (see [Setup](#setup)) and it'll turn
-> green once the workflow has run.
-
 ## 📋 Contents
 
 - [✨ Features](#features)
