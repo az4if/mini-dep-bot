@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://github.com/az4if/your-repo/actions/workflows/tests.yml/badge.svg)](https://github.com/az4if/your-repo/actions/workflows/tests.yml)
+[![Tests](https://github.com/az4if/mini-dep-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/az4if/mini-dep-bot/actions/workflows/tests.yml)
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
 > A small, self-built GitHub bot inspired by Renovate and Dependabot — no
