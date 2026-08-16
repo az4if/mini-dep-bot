@@ -183,8 +183,12 @@ git push -u origin main
 ```
 
 This can be a brand-new repo or an existing one — the bot only touches
-whichever supported manifests it finds at the root, and skips any that
-aren't there.
+whichever supported manifests actually exist anywhere in it, at any depth
+(see [🏢 Monorepos](#monorepos)), and skips the rest. You don't need all
+seven types present — a repo with nothing but a `package.json` behaves
+exactly the same as one with all seven. Add, delete, or replace any of
+them whenever you like: nothing is hardcoded or assumed from a previous
+run, each run just checks whatever's actually in the repo at that moment.
 
 ### 2. Allow Actions to open pull requests
 
