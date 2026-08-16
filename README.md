@@ -1,20 +1,48 @@
-# mini-dep-bot
+# 🤖 mini-dep-bot
 
-A small, self-built GitHub bot inspired by Renovate and Dependabot. It scans
-every `package.json`, `requirements.txt`, `go.mod`, `pyproject.toml`,
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Tests](https://github.com/your-username/your-repo/actions/workflows/tests.yml/badge.svg)](https://github.com/your-username/your-repo/actions/workflows/tests.yml)
+![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
+
+> A small, self-built GitHub bot inspired by Renovate and Dependabot — no
+> wrapper libraries, talks to the GitHub REST/GraphQL APIs directly.
+
+It scans every `package.json`, `requirements.txt`, `go.mod`, `pyproject.toml`,
 `Cargo.toml`, `Gemfile`, and `composer.json` anywhere in a repository — not
 just the root, so monorepos are covered too — for outdated dependencies,
 checking npm, PyPI, the Go module proxy, crates.io, RubyGems, and Packagist,
 and opens a pull request per manifest bundling every update it finds.
 
-## Features
+> [!NOTE]
+> The **Tests** badge above points at `your-username/your-repo` — swap that
+> for wherever you push this project (see [Setup](#setup)) and it'll turn
+> green once the workflow has run.
+
+## 📋 Contents
+
+- [✨ Features](#features)
+- [⚙️ How it works](#how-it-works)
+- [🗂️ Project layout](#project-layout)
+- [🚀 Setup](#setup)
+- [☁️ Deploying with GitHub Actions](#deploying-with-github-actions)
+- [🏢 Monorepos](#monorepos)
+- [🔒 Lockfiles](#lockfiles)
+- [🛠️ Configuration](#configuration)
+- [🙈 Ignoring a single dependency](#ignoring-a-single-dependency)
+- [⚠️ Limitations](#limitations)
+- [💬 Support](#support)
+- [📄 License](#license)
+
+<a name="features"></a>
+## ✨ Features
 
 - Checks seven ecosystems: npm (`package.json`), Python (`requirements.txt`,
   Poetry-style and PEP 621 `pyproject.toml`), Go (`go.mod`), Rust
   (`Cargo.toml`), Ruby (`Gemfile`), and PHP (`composer.json`)
 - Scans the whole repo, not just the root — a monorepo with several
   `package.json`/`requirements.txt` files gets all of them, automatically
-  (see [Monorepos](#monorepos) below)
+  (see [🏢 Monorepos](#monorepos) below)
 - Range-aware: a `^2.1.0` / `~=2.31` / etc. dependency is only flagged
   outdated once a release actually escapes that range, not on every new
   patch it already allows
@@ -28,13 +56,13 @@ and opens a pull request per manifest bundling every update it finds.
   when the registry exposes one, and — when run via the provided GitHub
   Actions workflow — regenerates any companion lockfile for real, using the
   actual package manager, whichever of npm/Yarn/pnpm's is actually present
-  for a JS manifest (see [Lockfiles](#lockfiles) below)
+  for a JS manifest (see [🔒 Lockfiles](#lockfiles) below)
 - Optional auto-merge for a PR where every bundled bump is patch-level,
   gated behind `.mini-dep-bot.yml`
 - Optional combined mode: one PR for every manifest instead of one PR per
   manifest, via `.mini-dep-bot.yml`'s `combined_pr: true`
 - A `# mini-dep-bot: ignore` comment on any dependency line excludes it,
-  no config file edit required (see [Ignoring a single
+  no config file edit required (see [🙈 Ignoring a single
   dependency](#ignoring-a-single-dependency))
 - A readable job summary in the GitHub Actions UI (`$GITHUB_STEP_SUMMARY`)
   in addition to console logs
@@ -49,16 +77,18 @@ and opens a pull request per manifest bundling every update it finds.
 - No wrapper libraries — talks to the GitHub REST/GraphQL APIs directly
   with `requests`
 
-**Two things worth knowing up front:**
-- Ecosystem parsing covers the common cases for each format (including
-  Cargo's nested `[dependencies.name]` tables and implicit caret default,
-  and Ruby's pessimistic `~>` operator) but isn't exhaustive — see
-  [Limitations](#limitations) for the exact scope of each.
-- Lockfiles get regenerated for real, but only when run through the
-  provided GitHub Actions workflow (see [Lockfiles](#lockfiles)) — running
-  `bot.py` standalone still leaves that as a manual step.
+> [!IMPORTANT]
+> Two things worth knowing up front:
+> - Ecosystem parsing covers the common cases for each format (including
+>   Cargo's nested `[dependencies.name]` tables and implicit caret default,
+>   and Ruby's pessimistic `~>` operator) but isn't exhaustive — see
+>   [⚠️ Limitations](#limitations) for the exact scope of each.
+> - Lockfiles get regenerated for real, but only when run through the
+>   provided GitHub Actions workflow (see [🔒 Lockfiles](#lockfiles)) —
+>   running `bot.py` standalone still leaves that as a manual step.
 
-## How it works
+<a name="how-it-works"></a>
+## ⚙️ How it works
 
 1. Reads each supported manifest from a target repo via the GitHub Contents
    API (`github_api.py`).
@@ -74,7 +104,8 @@ and opens a pull request per manifest bundling every update it finds.
    auto-merge if configured and every bump is patch-level — unless
    `--dry-run` is set, in which case it only reports what it would have done.
 
-## Project layout
+<a name="project-layout"></a>
+## 🗂️ Project layout
 
 ```
 mini-dep-bot/
@@ -94,7 +125,12 @@ mini-dep-bot/
     └── tests.yml                 # runs tests/ on push and PR
 ```
 
-## Setup
+<a name="setup"></a>
+## 🚀 Setup
+
+Running it locally is the fastest way to try it out; [☁️ Deploying with
+GitHub Actions](#deploying-with-github-actions) below is the way to actually
+run it long-term.
 
 1. Install dependencies:
    ```bash
@@ -118,6 +154,11 @@ mini-dep-bot/
    python bot.py --dry-run
    ```
 
+> [!TIP]
+> Start with `--dry-run` on a real repo before letting it open PRs for
+> real — it makes only read-only API calls, so nothing gets touched.
+
+<a name="running-the-tests"></a>
 ### Running the tests
 
 ```bash
@@ -127,7 +168,8 @@ pytest tests/ -v
 Everything in `tests/` runs against mocked GitHub/registry calls — no
 network access or token needed.
 
-## Deploying with GitHub Actions
+<a name="deploying-with-github-actions"></a>
+## ☁️ Deploying with GitHub Actions
 
 This is the intended way to run the bot — no external hosting, no
 timeouts to worry about, and it uses GitHub's own automatic token instead
@@ -158,11 +200,14 @@ and:
 - Select **"Read and write permissions"**
 - Check **"Allow GitHub Actions to create and approve pull requests"**
 
-Without this, the workflow will run but fail at the PR-creation step.
-
-If you plan to use `automerge` in `.mini-dep-bot.yml`, also turn on
-**Settings → General → Allow auto-merge** — without it, GitHub silently
-ignores the auto-merge request (the bot logs this as a no-op, not an error).
+> [!WARNING]
+> Without this, the workflow will run but fail at the PR-creation step.
+>
+> If you plan to use `automerge` in `.mini-dep-bot.yml`, also turn on
+> **Settings → General → Allow auto-merge** — without it, GitHub rejects
+> the auto-merge request (the bot now surfaces this as a warning, both in
+> the console output and the Actions step summary, instead of staying quiet
+> about it).
 
 ### 3. That's it — no secrets to add
 
@@ -198,13 +243,15 @@ same automatic token — nothing extra to set up for it either.
   redundant if the repo already has **Settings → General → Automatically
   delete head branches** turned on for everything)
 
+<a name="changing-the-schedule"></a>
 ### Changing the schedule
 
 Edit the `cron` line in `.github/workflows/dependency-check.yml`. It uses
 standard 5-field cron syntax in UTC, e.g. `0 6 * * 1` = every Monday at
 06:00 UTC, `0 0 * * *` = daily at midnight UTC.
 
-## Monorepos
+<a name="monorepos"></a>
+## 🏢 Monorepos
 
 Manifest discovery isn't hardcoded to the repo root — before scanning,
 `bot.py` lists every file git tracks in the repo (one call, via the
@@ -225,10 +272,11 @@ A few defaults keep this safe:
   to root-only manifests — the same behavior as before monorepo support
   existed, rather than failing the run.
 - Add your own exclusions with `.mini-dep-bot.yml`'s `exclude_paths` (see
-  [Configuration](#configuration)) — useful for a vendored/example
+  [🛠️ Configuration](#configuration)) — useful for a vendored/example
   directory that isn't one of the built-in defaults.
 
-## Lockfiles
+<a name="lockfiles"></a>
+## 🔒 Lockfiles
 
 `bot.py` itself only ever edits a manifest file via the GitHub API — it
 has no repo checkout or toolchain, and hand-editing a lockfile risks
@@ -261,12 +309,14 @@ in the workflow) covers Yarn/pnpm on Node 16.9+ without a separate setup
 step. If your runner is missing one of these anyway, add the matching
 `actions/setup-*` step before "Regenerate lockfiles" in the workflow file.
 
-This step only runs as part of the GitHub Actions workflow. Running
-`python bot.py` standalone updates the manifest but not the lockfile —
-regenerate it yourself with the command above for your ecosystem, from
-the manifest's own directory.
+> [!NOTE]
+> This step only runs as part of the GitHub Actions workflow. Running
+> `python bot.py` standalone updates the manifest but not the lockfile —
+> regenerate it yourself with the command above for your ecosystem, from
+> the manifest's own directory.
 
-## Configuration
+<a name="configuration"></a>
+## 🛠️ Configuration
 
 Drop a `.mini-dep-bot.yml` at the root of the target repo to customize
 what the bot touches (see `.mini-dep-bot.yml.example` for a template).
@@ -296,13 +346,15 @@ No config file at all means the previous behavior: nothing ignored,
 nothing pinned, auto-merge off, one PR per manifest, every manifest in
 the repo scanned except the built-in noise-directory defaults.
 
-A malformed entry — wrong type, or a value like `pin: {some-pkg: two}`
-that isn't parseable — doesn't crash the run, but it also doesn't fail
-silently: it's skipped and reported both in the console output and the
-GitHub Actions step summary, so a typo in this file is never
-indistinguishable from "nothing configured".
+> [!TIP]
+> A malformed entry — wrong type, or a value like `pin: {some-pkg: two}`
+> that isn't parseable — doesn't crash the run, but it also doesn't fail
+> silently: it's skipped and reported both in the console output and the
+> GitHub Actions step summary, so a typo in this file is never
+> indistinguishable from "nothing configured".
 
-## Ignoring a single dependency
+<a name="ignoring-a-single-dependency"></a>
+## 🙈 Ignoring a single dependency
 
 For a one-off "don't touch this" that doesn't need a `.mini-dep-bot.yml`
 edit, add a `mini-dep-bot: ignore` comment on the same line as the
@@ -334,7 +386,8 @@ This works for every format that has a comment syntax. `package.json` and
 `composer.json` are JSON, which doesn't support comments — use
 `.mini-dep-bot.yml`'s `ignore:` list for those instead.
 
-## Limitations
+<a name="limitations"></a>
+## ⚠️ Limitations
 
 - Version comparison uses `packaging`'s PEP 440 comparator (with a
   numeric-segment fallback for anything it can't parse, e.g. some Go
@@ -369,13 +422,14 @@ This works for every format that has a comment syntax. `package.json` and
   left alone (explicit ceiling/exclusion, same reasoning as
   `requirements.txt`), as are unpinned or `git:`/`path:`-sourced gems —
   there's no registry version to compare those against.
-- **Lockfiles aren't hand-edited** — see [Lockfiles](#lockfiles) above for
-  how they get regenerated for real when run via the provided workflow,
-  and what still requires a manual step outside of it.
-- Manifest discovery (see [Monorepos](#monorepos)) uses GitHub's recursive
-  Git Trees API, which caps out on extremely large repos (very high file
-  counts / response size) — a truncated listing just means some deeply
-  nested manifests may not get discovered, rather than the run failing.
+- **Lockfiles aren't hand-edited** — see [🔒 Lockfiles](#lockfiles) above
+  for how they get regenerated for real when run via the provided
+  workflow, and what still requires a manual step outside of it.
+- Manifest discovery (see [🏢 Monorepos](#monorepos)) uses GitHub's
+  recursive Git Trees API, which caps out on extremely large repos (very
+  high file counts / response size) — a truncated listing just means some
+  deeply nested manifests may not get discovered, rather than the run
+  failing.
 - The `automerge` config only ever asks GitHub to auto-merge — it never
   bypasses branch protection or required status checks, and does nothing
   if the repo's "Allow auto-merge" setting is off. If GitHub rejects the
@@ -387,10 +441,12 @@ This works for every format that has a comment syntax. `package.json` and
   crates.io, RubyGems, Packagist, and OSV lookups likewise need access to
   `crates.io`, `rubygems.org`, `repo.packagist.org`, and `api.osv.dev`.
 
-## Support
+<a name="support"></a>
+## 💬 Support
 
 Questions, bug reports, or integration issues: [az4if@proton.me](mailto:az4if@proton.me)
 
-## License
+<a name="license"></a>
+## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
